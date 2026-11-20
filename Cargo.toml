@@ -3,7 +3,8 @@ name = "cybervpn"
 version = "0.1.0"
 edition = "2021"
 description = "CyberVPN — desktop Hysteria2 VPN (TUN) with tray, notifications and dashboard"
-license = "MIT"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/sociocyber1/CyberVPN"
 
 [dependencies]
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
