@@ -1,0 +1,51 @@
+[package]
+name = "cybervpn"
+version = "0.1.0"
+edition = "2021"
+description = "CyberVPN — desktop Hysteria2 VPN (TUN) with tray, notifications and dashboard"
+license = "MIT"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui_extras = "0.37"
+tray-icon = { version = "0.21", default-features = false }
+notify-rust = "4"
+arboard = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+percent-encoding = "2"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "sync"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "socks", "http2", "system-proxy"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+resvg = { version = "0.45", default-features = false }
+lzma-rs = "0.3"
+idna = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_Security",
+  "Win32_System_Threading",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[package.metadata.winres]
+ProductName = "CyberVPN"
