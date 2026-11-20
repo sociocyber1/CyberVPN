@@ -1,32 +1,38 @@
 name: build
 on:
   push:
+    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
-  release:
-    types: [published]
 permissions:
   contents: write
 jobs:
-  linux:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, bin: cybervpn, asset: cybervpn-linux-x86_64 }
+          - { os: windows-latest, bin: cybervpn.exe, asset: cybervpn-windows-x86_64.exe }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
-      - run: cargo build --release && cargo test --release
-      - uses: actions/upload-artifact@v4
-        with: { name: cybervpn-linux-x86_64, path: target/release/cybervpn }
-  windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
       - run: cargo build --release
+      - if: runner.os == 'Linux'
+        run: cargo test --release
+      - shell: bash
+        run: |
+          cp target/release/${{ matrix.bin }} ${{ matrix.asset }}
+          sha256sum ${{ matrix.asset }} > ${{ matrix.asset }}.sha256
       - uses: actions/upload-artifact@v4
-        with: { name: cybervpn-windows-x86_64, path: target/release/cybervpn.exe }
-      # on a published release: attach the Windows build to it
-      - if: github.event_name == 'release'
+        with: { name: "${{ matrix.asset }}", path: "${{ matrix.asset }}*" }
+      # version tag (v1.2.3) → GitHub release with the binaries
+      - if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
-          cp target/release/cybervpn.exe cybervpn-windows-x86_64.exe
-          sha256sum cybervpn-windows-x86_64.exe > cybervpn-windows-x86_64.exe.sha256
-          gh release upload "${{ github.event.release.tag_name }}" cybervpn-windows-x86_64.exe cybervpn-windows-x86_64.exe.sha256 --clobber
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --title "CyberVPN $GITHUB_REF_NAME" --notes-file .github/release-notes.md || true
+          gh release upload "$GITHUB_REF_NAME" ${{ matrix.asset }} ${{ matrix.asset }}.sha256 --clobber
