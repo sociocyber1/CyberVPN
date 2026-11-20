@@ -4,6 +4,8 @@ on:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+  release:
+    types: [published]
 permissions:
   contents: write
 jobs:
@@ -35,4 +37,7 @@ jobs:
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --title "CyberVPN $GITHUB_REF_NAME" --notes-file .github/release-notes.md || true
+          # a release made on github.com with empty notes gets the prepared ones
+          [ -n "$(gh release view "$GITHUB_REF_NAME" --json body -q .body)" ] || gh release edit "$GITHUB_REF_NAME" --notes-file .github/release-notes.md
+          [ -n "$(gh release view "$GITHUB_REF_NAME" --json body -q .body)" ] || gh release edit "$GITHUB_REF_NAME" --notes-file .github/release-notes.md
           gh release upload "$GITHUB_REF_NAME" ${{ matrix.asset }} ${{ matrix.asset }}.sha256 --clobber
