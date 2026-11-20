@@ -14,7 +14,6 @@ use reqwest::{header, Client, StatusCode};
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{IsTerminal, Write};
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -189,7 +188,7 @@ async fn fetch_chunk(c: &Client, sh: &Shared, i: usize) -> Result<()> {
     while pos <= end {
         let Some(bytes) = tokio::time::timeout(IDLE, r.chunk()).await.context("stalled 20 s")?? else { break };
         let take = (bytes.len() as u64).min(end + 1 - pos) as usize;
-        sh.file.write_all_at(&bytes[..take], pos)?;
+        write_at(&sh.file, &bytes[..take], pos)?;
         pos += take as u64;
         sh.done[i].fetch_add(take as u64, Ordering::Relaxed);
     }
@@ -364,4 +363,24 @@ async fn resolve_retry(c: &Client, url: &str) -> Result<Resolved> {
         }
     }
     bail!("server unreachable — check the internet or use --proxy")
+}
+
+/// Positional write (parallel chunks write into one preallocated file).
+#[cfg(unix)]
+fn write_at(f: &std::fs::File, buf: &[u8], pos: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::write_all_at(f, buf, pos)
+}
+
+#[cfg(windows)]
+fn write_at(f: &std::fs::File, mut buf: &[u8], mut pos: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        let n = f.seek_write(buf, pos)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        buf = &buf[n..];
+        pos += n as u64;
+    }
+    Ok(())
 }
