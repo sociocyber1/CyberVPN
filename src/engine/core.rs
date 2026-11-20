@@ -195,7 +195,9 @@ pub const LAN_V6: &[&str] = &["fc00::/7", "fe80::/10", "ff00::/8"];
 
 /// Build the hysteria client config. JSON is valid YAML, so it is written
 /// as config.yaml and every string is safely quoted.
-pub fn build_config(p: &Profile, u: &Hy2Uri, s: &Settings, server_ips: &[IpAddr]) -> Value {
+/// `tun`: whole-system TUN (needs admin). `proxy_ports`: SOCKS5 + HTTP
+/// listeners on localhost (used by the mixed proxy port; no admin needed).
+pub fn build_config(p: &Profile, u: &Hy2Uri, s: &Settings, server_ips: &[IpAddr], tun: bool, proxy_ports: Option<(u16, u16)>) -> Value {
     // Connect to the resolved IP (SNI keeps the hostname). This way the core
     // never needs DNS to reconnect, even after we point DNS into the tunnel.
     let server = match server_ips.iter().find(|i| i.is_ipv4()).or(server_ips.first()) {
@@ -248,6 +250,13 @@ pub fn build_config(p: &Profile, u: &Hy2Uri, s: &Settings, server_ips: &[IpAddr]
         cfg.insert("bandwidth".into(), Value::Object(bw));
     }
     cfg.insert("fastOpen".into(), json!(s.fast_open));
+    if let Some((socks, http)) = proxy_ports {
+        cfg.insert("socks5".into(), json!({ "listen": format!("127.0.0.1:{socks}") }));
+        cfg.insert("http".into(), json!({ "listen": format!("127.0.0.1:{http}") }));
+    }
+    if !tun {
+        return Value::Object(cfg);
+    }
     cfg.insert(
         "tun".into(),
         json!({
@@ -423,7 +432,7 @@ mod tests {
         let u = Hy2Uri::parse("hy2://pw@vpn.example.com:45765?obfs=salamander&obfs-password=ob&sni=vpn.example.com#t").unwrap();
         let p = Profile { name: "t".into(), uri: String::new(), up_mbps: Some(50), down_mbps: Some(200) };
         let ips: Vec<IpAddr> = vec!["203.0.113.7".parse().unwrap()];
-        let c = build_config(&p, &u, &Settings::default(), &ips);
+        let c = build_config(&p, &u, &Settings::default(), &ips, true, None);
         assert_eq!(c["server"], "203.0.113.7:45765");
         assert_eq!(c["tls"]["sni"], "vpn.example.com");
         assert_eq!(c["obfs"]["type"], "salamander");

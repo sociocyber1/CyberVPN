@@ -1,6 +1,7 @@
 pub mod core;
 pub mod dns;
 pub mod download;
+pub mod mixed;
 pub mod split;
 pub mod sys;
 pub mod traffic;

@@ -16,6 +16,8 @@ pub enum Proto { Tcp, Udp }
 #[derive(Clone)]
 pub struct Conn {
     pub proto: Proto,
+    /// "tun", "socks" or "http"
+    pub via: &'static str,
     pub src: String,
     pub dst: Option<String>,
     pub domain: Option<String>,
@@ -48,6 +50,18 @@ pub struct Traffic {
 fn host_of(addr: &str) -> Option<IpAddr> {
     let h = addr.rsplit_once(':')?.0.trim_start_matches('[').trim_end_matches(']');
     h.parse().ok()
+}
+
+/// Host part of "host:port" or of a URL, when it is a name (not an IP).
+fn name_of(addr: &str) -> Option<String> {
+    let a = addr.split("://").last().unwrap_or(addr);
+    let hostport = a.split('/').next().unwrap_or(a);
+    let host = match hostport.rsplit_once(':') {
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => hostport,
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    (!host.is_empty() && host.parse::<IpAddr>().is_err()).then(|| host.to_string())
 }
 
 fn field<'a>(fields: &'a str, key: &str) -> Option<&'a str> {
@@ -83,16 +97,18 @@ impl Traffic {
     pub fn on_log(&mut self, l: &LogLine) -> bool {
         let f = l.fields.as_str();
         match l.msg.as_str() {
-            "TUN TCP request" => {
-                let dst = field(f, "reqAddr").map(str::to_string);
-                let domain = dst.as_deref().and_then(host_of).and_then(|ip| self.ip_names.get(&ip).cloned());
-                if let Some(d) = &domain {
-                    *self.domain_hits.entry(d.clone()).or_default() += 1;
-                } else if let Some(ip) = dst.as_deref().and_then(host_of) {
-                    *self.domain_hits.entry(ip.to_string()).or_default() += 1;
+            "TUN TCP request" | "SOCKS5 TCP request" | "HTTP CONNECT request" | "HTTP request" => {
+                let via = via_of(&l.msg);
+                let dst = field(f, "reqAddr").or_else(|| field(f, "reqURL")).map(str::to_string);
+                let domain = dst.as_deref().and_then(name_of).or_else(|| {
+                    dst.as_deref().and_then(host_of).and_then(|ip| self.ip_names.get(&ip).cloned())
+                });
+                let key = domain.clone().or_else(|| dst.as_deref().and_then(host_of).map(|ip| ip.to_string()));
+                if let Some(k) = key {
+                    *self.domain_hits.entry(k).or_default() += 1;
                 }
                 self.push(Conn {
-                    proto: Proto::Tcp,
+                    proto: Proto::Tcp, via,
                     src: field(f, "addr").unwrap_or("").to_string(),
                     dst, domain, app: None, app_tried: false,
                     time: now_hms(), opened: Instant::now(), closed: None, error: None,
@@ -100,9 +116,9 @@ impl Traffic {
                 self.total_tcp += 1;
                 true
             }
-            "TUN UDP request" => {
+            "TUN UDP request" | "SOCKS5 UDP request" => {
                 self.push(Conn {
-                    proto: Proto::Udp,
+                    proto: Proto::Udp, via: via_of(&l.msg),
                     src: field(f, "addr").unwrap_or("").to_string(),
                     dst: None, domain: None, app: None, app_tried: false,
                     time: now_hms(), opened: Instant::now(), closed: None, error: None,
@@ -110,20 +126,23 @@ impl Traffic {
                 self.total_udp += 1;
                 true
             }
-            "TUN TCP closed" | "TUN TCP error" | "TUN UDP closed" | "TUN UDP error" => {
-                let proto = if l.msg.contains("TCP") { Proto::Tcp } else { Proto::Udp };
+            "TUN TCP closed" | "TUN TCP error" | "TUN UDP closed" | "TUN UDP error"
+            | "SOCKS5 TCP closed" | "SOCKS5 TCP error" | "SOCKS5 UDP closed" | "SOCKS5 UDP error"
+            | "HTTP CONNECT closed" | "HTTP CONNECT error" | "HTTP closed" | "HTTP error" => {
+                let proto = if l.msg.contains("UDP") { Proto::Udp } else { Proto::Tcp };
+                let via = via_of(&l.msg);
                 let src = field(f, "addr").unwrap_or("");
                 let err = l.msg.ends_with("error").then(|| field(f, "error").unwrap_or("error").to_string());
                 if err.is_some() {
                     self.errors += 1;
                 }
-                if let Some(c) = self.conns.iter_mut().rev().find(|c| c.proto == proto && c.is_open() && c.src == src) {
+                if let Some(c) = self.conns.iter_mut().rev().find(|c| c.proto == proto && c.via == via && c.is_open() && c.src == src) {
                     c.closed = Some(Instant::now());
                     c.error = err;
                 }
                 true
             }
-            m if m.starts_with("TUN ") => true,
+            m if m.starts_with("TUN ") || m.starts_with("SOCKS5 ") || m.starts_with("HTTP ") => true,
             _ => false,
         }
     }
@@ -182,6 +201,10 @@ impl Traffic {
     }
 }
 
+fn via_of(msg: &str) -> &'static str {
+    if msg.starts_with("SOCKS5") { "socks" } else if msg.starts_with("HTTP") { "http" } else { "tun" }
+}
+
 // ---------------------------------------------------------------- apps
 
 /// Map local ports → process name (like `ss -p`): /proc/net/{tcp,udp}
@@ -237,6 +260,8 @@ pub fn apps_for_ports(ports: &[u16]) -> HashMap<u16, String> {
     out
 }
 
+// ---------------------------------------------------------------- packets
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +280,14 @@ mod tests {
         assert_eq!(t.open_count(), (0, 0));
         assert_eq!(t.top_domains(5)[0], ("github.com".to_string(), 1));
         assert!(!t.on_log(&parse_log(r#"{"level":"info","msg":"connected to server"}"#)));
+        // browser through the proxy: domain comes straight from reqAddr / reqURL
+        t.on_log(&parse_log(r#"{"level":"debug","msg":"SOCKS5 TCP request","addr":"127.0.0.1:5000","reqAddr":"www.youtube.com:443"}"#));
+        t.on_log(&parse_log(r#"{"level":"debug","msg":"HTTP request","addr":"127.0.0.1:5001","reqURL":"http://example.org/index.html"}"#));
+        let c: Vec<_> = t.conns.iter().rev().take(2).collect();
+        assert_eq!((c[0].via, c[0].domain.as_deref()), ("http", Some("example.org")));
+        assert_eq!((c[1].via, c[1].domain.as_deref()), ("socks", Some("www.youtube.com")));
+        t.on_log(&parse_log(r#"{"level":"debug","msg":"SOCKS5 TCP closed","addr":"127.0.0.1:5000","reqAddr":"www.youtube.com:443"}"#));
+        assert_eq!(t.open_count(), (1, 0));
     }
 
     #[cfg(target_os = "linux")]

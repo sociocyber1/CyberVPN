@@ -24,6 +24,8 @@ fn run_dir() -> PathBuf {
 }
 
 struct Guards {
+    sysproxy: Option<crate::sysproxy::SystemProxy>,
+    _mixed: Option<crate::engine::mixed::MixedProxy>,
     child: Option<Child>,
     dns: Option<DnsGuard>,
     _dns_server: Option<DnsServer>,
@@ -33,6 +35,7 @@ struct Guards {
 
 impl Drop for Guards {
     fn drop(&mut self) {
+        drop(self.sysproxy.take()); // browsers stop using the proxy first
         if let Some(mut c) = self.child.take() {
             core::stop(&mut c);
         }
@@ -72,10 +75,11 @@ pub fn run(port: u16, token: &str) -> Result<()> {
         });
     }
 
-    match session(&start, &stop, &mut out) {
+    let mut send = |m: BackendMsg| ipc::send(&mut out, &m).is_ok();
+    match session(&start, &stop, &mut send) {
         Ok(()) => Ok(()),
         Err(e) => {
-            let _ = ipc::send(&mut out, &BackendMsg::Fatal(format!("{e:#}")));
+            send(BackendMsg::Fatal(format!("{e:#}")));
             Err(e)
         }
     }
@@ -90,14 +94,18 @@ extern "C" fn on_signal(_: libc::c_int) {
 
 enum Probe { Lat(Option<u64>), Ip(Option<ExitInfo>), Apps(std::collections::HashMap<u16, String>), Ipv6(Option<bool>) }
 
-fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) -> Result<()> {
+/// One VPN session. `st.tun`: whole system through a TUN device (needs
+/// admin). Otherwise proxy only: runs as the normal user, nothing in the
+/// system is changed except (optionally) the desktop proxy setting.
+pub fn session(st: &BackendStart, stop: &AtomicBool, send: &mut dyn FnMut(BackendMsg) -> bool) -> Result<()> {
     let s = &st.settings;
-    if !sys::is_elevated() {
+    let tun = st.tun;
+    if tun && !sys::is_elevated() {
         bail!("backend is not running as administrator/root");
     }
     #[cfg(target_os = "linux")]
-    if let Ok(true) = sys::restore_dns() {
-        // left over from a crash
+    if tun {
+        let _ = sys::restore_dns(); // left over from a crash
     }
     let uri = Hy2Uri::parse(&st.profile.uri)?;
     let server_ips: Vec<IpAddr> = sys::resolve(&uri.host)?;
@@ -119,13 +127,33 @@ fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) 
     }
 
     // never run next to another TUN core (e.g. hy2tui): they share routing table 2022
-    for m in sys::tun_preflight(&s.tun_name, &["hytun"])? {
-        log(Level::Warn, m);
+    if tun {
+        for m in sys::tun_preflight(&s.tun_name, &["hytun"])? {
+            log(Level::Warn, m);
+        }
     }
-    let cfg = core::build_config(&st.profile, &uri, s, &server_ips);
-    let cfg_path = core::write_config(&run_dir(), &cfg)?;
+    // one local port for browsers and apps: SOCKS5 + HTTP (127.0.0.1:2080)
+    let (mut mixed, mut proxy_ports) = (None, None);
+    if !s.proxy.trim().is_empty() {
+        let (sp, hp) = (crate::engine::mixed::free_port(), crate::engine::mixed::free_port());
+        match crate::engine::mixed::MixedProxy::start(s.proxy.trim(), sp, hp) {
+            Ok(m) => {
+                mixed = Some(m);
+                proxy_ports = Some((sp, hp));
+            }
+            Err(e) if tun => log(Level::Warn, format!("proxy port {} unavailable: {e}", s.proxy.trim())),
+            Err(e) => bail!("cannot open the proxy port {}: {e} (is another VPN app using it?)", s.proxy.trim()),
+        }
+    } else if !tun {
+        bail!("proxy mode needs a proxy address (Settings → Proxy address)");
+    }
+    let socks_via: Option<std::net::SocketAddr> = proxy_ports.map(|(sp, _)| std::net::SocketAddr::from(([127, 0, 0, 1], sp)));
+    let probe_via = if tun { None } else { socks_via };
+    let cfg = core::build_config(&st.profile, &uri, s, &server_ips, tun, proxy_ports);
+    let dir = if tun { run_dir() } else { crate::store::Paths::get().run_dir() };
+    let cfg_path = core::write_config(&dir, &cfg)?;
     let mut untune = vec![];
-    if s.tune_sysctl {
+    if tun && s.tune_sysctl {
         let (msgs, r) = sys::tune();
         for m in msgs {
             log(Level::Info, m);
@@ -135,13 +163,30 @@ fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) 
 
     let (log_tx, log_rx): (Sender<LogLine>, Receiver<LogLine>) = channel();
     let child = core::spawn(&st.core_path, &cfg_path, log_tx.clone())?;
-    let mut g = Guards { child: Some(child), dns: None, _dns_server: None, untune, cfg_path: cfg_path.clone() };
+    let proxy_addr = mixed.as_ref().map(|m| m.listen.to_string()).unwrap_or_default();
+    let mut g = Guards { sysproxy: None, _mixed: None, child: Some(child), dns: None, _dns_server: None, untune, cfg_path: cfg_path.clone() };
+    if !tun {
+        log(Level::Info, format!("proxy mode (no admin rights): SOCKS5 + HTTP on {proxy_addr}"));
+        if s.system_proxy {
+            if let Some(m) = &mixed {
+                match crate::sysproxy::SystemProxy::apply(m.listen, &crate::store::Paths::get().sysproxy_backup()) {
+                    Ok((sp, what)) => {
+                        log(Level::Info, format!("{} → {proxy_addr} (restored when you turn the VPN off)", what.join(", ")));
+                        g.sysproxy = Some(sp);
+                    }
+                    Err(e) => log(Level::Warn, format!("{e} — set the proxy {proxy_addr} in your browser")),
+                }
+            }
+        }
+    } else if !proxy_addr.is_empty() {
+        log(Level::Info, format!("browser proxy: SOCKS5 + HTTP on {proxy_addr}"));
+    }
 
     let (dns_tx, dns_rx): (Sender<DnsEvent>, Receiver<DnsEvent>) = channel();
     #[allow(unused_mut)]
     let mut bypass: Option<std::sync::Arc<crate::engine::split::Bypass>> = None;
     #[cfg(target_os = "linux")]
-    if s.not_to_vpn {
+    if tun && s.not_to_vpn {
         if s.override_dns {
             let b = std::sync::Arc::new(crate::engine::split::Bypass::new(&s.not_to_vpn_domains, &s.direct_dns));
             log(Level::Info, format!("notToVPN: {} go direct (DNS {})", b.patterns().join(", "), s.direct_dns.join(", ")));
@@ -151,10 +196,10 @@ fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) 
         }
     }
     #[cfg(not(target_os = "linux"))]
-    if s.not_to_vpn {
+    if tun && s.not_to_vpn {
         log(Level::Warn, "notToVPN is not available on this system yet".into());
     }
-    if s.override_dns {
+    if tun && s.override_dns {
         #[cfg(target_os = "linux")]
         let servers = match DnsServer::start(&s.dns, dns_tx.clone(), bypass.clone(), s.ipv6 == "on") {
             Ok(srv) => {
@@ -181,7 +226,8 @@ fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) 
     // ---------------------------------------------------------------- loop
     let (probe_tx, probe_rx) = channel::<Probe>();
     let mut traffic = Traffic::default();
-    let mut tick = Tick { server_ip: server_ips[0].to_string(), ..Default::default() };
+    let mut tick = Tick { server_ip: server_ips[0].to_string(), proxy_mode: !tun, proxy_addr: proxy_addr.clone(), system_proxy: g.sysproxy.is_some(), ..Default::default() };
+    let mut last_proxy: Option<(u64, u64, Instant)> = None;
     let mut last_if: Option<(IfStats, Instant)> = None;
     let mut last_cpu: Option<(u64, Instant)> = None;
     let clk = sys::clk_tck();
@@ -278,7 +324,7 @@ fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) 
 
         // interface counters
         let now = Instant::now();
-        if let Some(cur) = sys::if_stats(&s.tun_name) {
+        if let Some(cur) = if tun { sys::if_stats(&s.tun_name) } else { None } {
             if let Some((l, lt)) = last_if {
                 let dt = now.duration_since(lt).as_secs_f64().max(0.001);
                 let d = |a: u64, b: u64| if a >= b { a - b } else { a };
@@ -301,6 +347,19 @@ fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) 
             tick.up_bps = 0.0;
             last_if = None;
         }
+        // proxy traffic does not pass the TUN device: add it
+        if let Some(m) = &mixed {
+            use std::sync::atomic::Ordering::Relaxed;
+            let (d, u) = (m.c.down.load(Relaxed), m.c.up.load(Relaxed));
+            if let Some((ld, lu, lt)) = last_proxy {
+                let dt = now.duration_since(lt).as_secs_f64().max(0.001);
+                tick.down_total += d - ld;
+                tick.up_total += u - lu;
+                tick.down_bps += (d - ld) as f64 / dt;
+                tick.up_bps += (u - lu) as f64 / dt;
+            }
+            last_proxy = Some((d, u, now));
+        }
         if let Some(pid) = g.child.as_ref().map(|c| c.id()) {
             if let Some((ticks, rss)) = sys::proc_cpu_rss(pid) {
                 if let Some((lt, lw)) = last_cpu {
@@ -316,13 +375,13 @@ fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) 
             probing_lat = true;
             last_lat = Some(now);
             let tx = probe_tx.clone();
-            std::thread::spawn(move || { let _ = tx.send(Probe::Lat(sys::latency_ms())); });
+            std::thread::spawn(move || { let _ = tx.send(Probe::Lat(sys::latency_ms(probe_via))); });
         }
         if connected && !probing_ip && last_ip.is_none_or(|t| t.elapsed() >= Duration::from_secs(120)) {
             probing_ip = true;
             last_ip = Some(now);
             let tx = probe_tx.clone();
-            std::thread::spawn(move || { let _ = tx.send(Probe::Ip(sys::public_ip())); });
+            std::thread::spawn(move || { let _ = tx.send(Probe::Ip(sys::public_ip(probe_via))); });
         }
         if !probing_apps && last_apps.elapsed() >= Duration::from_secs(1) {
             last_apps = now;
@@ -330,7 +389,14 @@ fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) 
             if !ports.is_empty() {
                 probing_apps = true;
                 let tx = probe_tx.clone();
-                std::thread::spawn(move || { let _ = tx.send(Probe::Apps(traffic::apps_for_ports(&ports))); });
+                // proxy connections: the core sees our relay socket; look up the app's own port instead
+                let map: std::collections::HashMap<u16, u16> = mixed.as_ref().map(|m| m.c.ports.lock().unwrap().clone()).unwrap_or_default();
+                std::thread::spawn(move || {
+                    let real: Vec<u16> = ports.iter().map(|p| *map.get(p).unwrap_or(p)).collect();
+                    let found = traffic::apps_for_ports(&real);
+                    let back = ports.iter().filter_map(|p| found.get(map.get(p).unwrap_or(p)).map(|a| (*p, a.clone()))).collect();
+                    let _ = tx.send(Probe::Apps(back));
+                });
             }
         }
         if last_dns_check.elapsed() >= Duration::from_secs(3) {
@@ -365,11 +431,12 @@ fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) 
                 open: c.is_open(),
                 error: c.error.clone().unwrap_or_default(),
                 dur_s: c.closed.unwrap_or_else(Instant::now).duration_since(c.opened).as_secs(),
+                via: c.via.to_string(),
             })
             .collect();
         tick.dns = dns_log.iter().rev().take(100).cloned().collect();
         tick.logs = std::mem::take(&mut pending_logs);
-        if ipc::send(out, &BackendMsg::Tick(Box::new(tick.clone()))).is_err() {
+        if !send(BackendMsg::Tick(Box::new(tick.clone()))) {
             break; // service gone
         }
         let spent = t0.elapsed();
@@ -377,7 +444,8 @@ fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) 
             std::thread::sleep(Duration::from_millis(500) - spent);
         }
     }
-    drop(g); // stop core, restore DNS + sysctl
+    g._mixed = mixed.take();
+    drop(g); // desktop proxy back, stop core, restore DNS + sysctl
     if bypass.take().is_some() {
         crate::engine::split::Bypass::cleanup_all();
     }

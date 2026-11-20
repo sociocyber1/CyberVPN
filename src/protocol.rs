@@ -16,6 +16,13 @@ pub struct BackendStart {
     pub profile: Profile,
     pub settings: Settings,
     pub core_path: PathBuf,
+    /// whole-system TUN (elevated backend) or proxy only (runs as the user)
+    #[serde(default = "yes")]
+    pub tun: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -31,11 +38,23 @@ pub struct ConnView {
     pub open: bool,
     pub error: String,
     pub dur_s: u64,
+    /// "tun", "socks" or "http"
+    #[serde(default)]
+    pub via: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct Tick {
     pub phase: Phase,
+    /// proxy-only mode (no TUN, no admin)
+    #[serde(default)]
+    pub proxy_mode: bool,
+    /// local SOCKS5/HTTP port ("" = off)
+    #[serde(default)]
+    pub proxy_addr: String,
+    /// the desktop proxy setting points at us
+    #[serde(default)]
+    pub system_proxy: bool,
     pub server_ip: String,
     pub down_bps: f64,
     pub up_bps: f64,
@@ -148,6 +167,9 @@ pub struct Snapshot {
     pub toast: Option<(u64, String, bool)>,
     pub can_skip_password: bool,
     pub platform_note: String,
+    /// the next "Turn on" covers the whole system (TUN); false = proxy only
+    #[serde(default)]
+    pub will_use_tun: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

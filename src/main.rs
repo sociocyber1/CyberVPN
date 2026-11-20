@@ -17,6 +17,7 @@ mod platform;
 mod protocol;
 mod service;
 mod store;
+mod sysproxy;
 mod tray;
 
 use protocol::Command;

@@ -31,6 +31,8 @@ struct Backend {
     stream: Option<TcpStream>,
     rx: Receiver<BEvent>,
     started: Instant,
+    /// proxy mode: the session runs in this process; set to stop it
+    stop: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 struct Svc {
@@ -194,7 +196,7 @@ impl Svc {
             // UI demo / screenshots: simulated traffic, no root, no network changes
             let (tx, rx) = channel();
             demo_backend(tx.clone(), self.store.profiles[idx].clone());
-            self.backend = Some(Backend { demo: true, tx, child: None, stream: None, rx, started: Instant::now() });
+            self.backend = Some(Backend { demo: true, tx, child: None, stream: None, rx, started: Instant::now(), stop: None });
             self.set_state(VpnState::Connecting);
             return;
         }
@@ -214,6 +216,31 @@ impl Svc {
         self.up.clear();
         self.lat.clear();
         self.notified_exit = false;
+        if !self.use_tun() {
+            // proxy mode: no admin rights, the session runs right here
+            let start = BackendStart {
+                profile: self.store.profiles[idx].clone(),
+                settings: self.store.settings.clone(),
+                core_path: self.core_path().unwrap_or_default(),
+                tun: false,
+            };
+            let (tx, rx) = channel();
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            {
+                let (tx, stop) = (tx.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    let mut send = |m: BackendMsg| tx.send(BEvent::Msg(m)).is_ok();
+                    if let Err(e) = crate::backend::session(&start, &stop, &mut send) {
+                        let _ = tx.send(BEvent::Msg(BackendMsg::Fatal(format!("{e:#}"))));
+                    }
+                    let _ = tx.send(BEvent::Closed);
+                });
+            }
+            self.backend = Some(Backend { demo: false, tx, child: None, stream: None, rx, started: Instant::now(), stop: Some(stop) });
+            self.set_state(VpnState::Connecting);
+            self.log(Level::Info, format!("starting VPN (proxy mode) for {}", self.store.profiles[idx].name));
+            return;
+        }
         let (listener, port) = match ipc::listen() {
             Ok(x) => x,
             Err(e) => return self.fail(format!("{e}")),
@@ -225,9 +252,18 @@ impl Svc {
         };
         let (tx, rx) = channel();
         accept_backend(listener, token, tx.clone());
-        self.backend = Some(Backend { demo: false, tx, child, stream: None, rx, started: Instant::now() });
+        self.backend = Some(Backend { demo: false, tx, child, stream: None, rx, started: Instant::now(), stop: None });
         self.set_state(VpnState::Authorizing);
         self.log(Level::Info, format!("starting VPN for {}", self.store.profiles[idx].name));
+    }
+
+    /// Whole system (TUN, admin) or proxy only? Auto never asks for a password.
+    fn use_tun(&self) -> bool {
+        match self.store.settings.vpn_mode {
+            crate::store::VpnMode::System => true,
+            crate::store::VpnMode::Proxy => false,
+            crate::store::VpnMode::Auto => crate::engine::sys::is_elevated() || platform::polkit_rule_installed(),
+        }
     }
 
     fn fail(&mut self, msg: String) {
@@ -240,6 +276,9 @@ impl Svc {
     fn disconnect(&mut self, quiet: bool) {
         self.want_on = false;
         if let Some(mut b) = self.backend.take() {
+            if let Some(stop) = &b.stop {
+                stop.store(true, Ordering::Relaxed); // proxy session: restores the desktop proxy and stops
+            }
             if let Some(s) = b.stream.take() {
                 let _ = s.shutdown(std::net::Shutdown::Both); // backend cleans up and exits
             }
@@ -389,6 +428,7 @@ impl Svc {
                         profile: self.store.profiles[i].clone(),
                         settings: self.store.settings.clone(),
                         core_path,
+                        tun: true,
                     };
                     if ipc::send(&mut s, &start).is_err() {
                         self.fail("backend did not accept the start request".into());
@@ -450,7 +490,7 @@ impl Svc {
         // pkexec cancelled / wrong password → child exits before connecting
         let mut fail = None;
         if let Some(b) = &mut self.backend {
-            if b.stream.is_none() && !b.demo {
+            if b.stream.is_none() && !b.demo && b.stop.is_none() {
                 if let Some(c) = &mut b.child {
                     if let Ok(Some(st)) = c.try_wait() {
                         fail = Some(match st.code() {
@@ -525,6 +565,7 @@ impl Svc {
             toast: self.toast.clone(),
             can_skip_password: cfg!(target_os = "linux") && !platform::polkit_rule_installed() && !crate::engine::sys::is_elevated(),
             platform_note: if cfg!(windows) { "Windows".into() } else { "Linux".into() },
+            will_use_tun: self.use_tun(),
         }
     }
 
@@ -607,7 +648,7 @@ fn demo_backend(tx: Sender<BEvent>, profile: crate::store::Profile) {
                 t.cpu = 4.0 + (i % 5) as f64;
                 if i % 2 == 0 {
                     let (d, ip, app) = sites[(i as usize / 2) % sites.len()];
-                    conns.insert(0, ConnView { time: crate::engine::core::now_hms(), tcp: i % 7 != 0, app: app.into(), dst: format!("{ip}:443"), domain: d.into(), open: true, error: String::new(), dur_s: 0 });
+                    conns.insert(0, ConnView { time: crate::engine::core::now_hms(), tcp: i % 7 != 0, app: app.into(), dst: format!("{ip}:443"), domain: d.into(), open: true, error: String::new(), dur_s: 0, via: "tun".into() });
                     dns.insert(0, crate::engine::dns::DnsEvent { time: crate::engine::core::now_hms(), name: d.into(), qtype: "A".into(), ips: vec![ip.parse().unwrap()], cname: None, ms: 30 + i % 90, status: "NOERROR".into(), tcp: false, direct: d.ends_with(".ru") });
                     t.total_tcp += 1;
                     t.dns_queries += 1;
@@ -738,6 +779,9 @@ pub fn run(autostart: bool, background: bool) -> Result<()> {
         update_trigger, update_rx, update_progress,
     };
     svc.prepare_engine(); // apply a staged update / install the built-in engine
+    if crate::sysproxy::restore(&svc.paths.sysproxy_backup()) {
+        svc.log(Level::Warn, "desktop proxy settings from a crashed session restored");
+    }
     svc.log(Level::Info, "CyberVPN started");
     #[cfg(target_os = "linux")]
     if !crate::engine::sys::is_elevated() && std::path::Path::new("/var/lib/cybervpn/resolv.conf.bak").exists() {
@@ -767,6 +811,13 @@ pub fn run(autostart: bool, background: bool) -> Result<()> {
         while let Ok(c) = cmd_rx.try_recv() {
             if matches!(c, Command::QuitApp) {
                 svc.disconnect(true);
+                // give a proxy session time to put the desktop proxy back
+                for _ in 0..30 {
+                    if !svc.paths.sysproxy_backup().exists() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
                 svc.broadcast(&ToGui::Bye);
                 let _ = svc.tray_tx.send(TrayCmd::Quit);
                 let _ = std::fs::remove_file(svc.paths.ipc_file());

@@ -387,9 +387,19 @@ pub use imp::*;
 
 // ---------------------------------------------------------------- probes
 
-fn http_get(addr: SocketAddr, host: &str, path: &str, timeout: Duration) -> Result<(Duration, String)> {
+/// TCP to host:port, directly (through the TUN when it is up) or through
+/// our local SOCKS5 proxy in proxy-only mode.
+fn open(host: &str, port: u16, via: Option<SocketAddr>, timeout: Duration) -> Result<TcpStream> {
+    if let Some(p) = via {
+        return Ok(crate::engine::mixed::socks5_connect(p, host, port, timeout)?);
+    }
+    let addr = (host, port).to_socket_addrs()?.find(|a| a.is_ipv4()).context("no IPv4 address")?;
+    Ok(TcpStream::connect_timeout(&addr, timeout)?)
+}
+
+fn http_get(host: &str, path: &str, via: Option<SocketAddr>, timeout: Duration) -> Result<(Duration, String)> {
     let t0 = Instant::now();
-    let mut s = TcpStream::connect_timeout(&addr, timeout)?;
+    let mut s = open(host, 80, via, timeout)?;
     s.set_read_timeout(Some(timeout))?;
     s.set_write_timeout(Some(timeout))?;
     write!(s, "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: CyberVPN\r\nConnection: close\r\n\r\n")?;
@@ -404,9 +414,8 @@ fn http_get(addr: SocketAddr, host: &str, path: &str, timeout: Duration) -> Resu
 }
 
 /// Round trip through the tunnel (HTTP time-to-first-byte from 1.1.1.1).
-pub fn latency_ms() -> Option<u64> {
-    let addr: SocketAddr = "1.1.1.1:80".parse().ok()?;
-    http_get(addr, "1.1.1.1", "/", Duration::from_secs(5)).ok().map(|(d, _)| d.as_millis() as u64)
+pub fn latency_ms(via: Option<SocketAddr>) -> Option<u64> {
+    http_get("1.1.1.1", "/", via, Duration::from_secs(5)).ok().map(|(d, _)| d.as_millis() as u64)
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -418,9 +427,8 @@ pub struct ExitInfo {
 }
 
 /// Exit IP + location as the internet sees it.
-pub fn public_ip() -> Option<ExitInfo> {
-    let addr = ("ip-api.com", 80).to_socket_addrs().ok()?.find(|a| a.is_ipv4())?;
-    let (_, resp) = http_get(addr, "ip-api.com", "/json/?fields=query,country,city,countryCode", Duration::from_secs(8)).ok()?;
+pub fn public_ip(via: Option<SocketAddr>) -> Option<ExitInfo> {
+    let (_, resp) = http_get("ip-api.com", "/json/?fields=query,country,city,countryCode", via, Duration::from_secs(8)).ok()?;
     let (_, body) = resp.split_once("\r\n\r\n")?;
     let start = body.find('{')?;
     let end = body.rfind('}')?;

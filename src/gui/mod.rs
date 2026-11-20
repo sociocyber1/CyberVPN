@@ -705,8 +705,11 @@ impl App {
 
         if st == VpnState::Connected {
             // what protects you right now, at a glance
+            let proxy_mode = tk.is_some_and(|t| t.proxy_mode);
             let mut chips: Vec<String> = vec![tr("Encrypted").into(), "Hysteria2 · QUIC".into()];
-            if snap.store.settings.override_dns {
+            if proxy_mode {
+                chips.push(trf("Proxy {}", &[&tk.map(|t| t.proxy_addr.clone()).unwrap_or_default()]));
+            } else if snap.store.settings.override_dns {
                 chips.push(tr("Private DNS").into());
             }
             if let Some(ms) = tk.and_then(|t| t.latency_ms) {
@@ -719,6 +722,15 @@ impl App {
                     pill(ui, c, p.sky, p.sky_soft);
                 }
             });
+            if proxy_mode {
+                ui.add_space(4.0);
+                let note = if tk.is_some_and(|t| t.system_proxy) {
+                    tr("Proxy mode, no admin rights: browsers and apps that use the system proxy go through the VPN.")
+                } else {
+                    tr("Proxy mode, no admin rights: set this proxy (SOCKS5 or HTTP) in your browser.")
+                };
+                ui.vertical_centered(|ui| ui.label(RichText::new(note).size(12.0).color(p.dim)));
+            }
             ui.add_space(4.0);
         }
         ui.add_space(6.0);
@@ -1183,6 +1195,29 @@ impl App {
                     self.group_title(ui, tr("Connection"));
                     boxed_list(&p).show(ui, |ui| {
                         ui.set_width(ui.available_width());
+                        let how = if snap.will_use_tun {
+                            tr("Now: whole system (all apps, DNS)")
+                        } else {
+                            tr("Now: proxy only — no admin password needed")
+                        };
+                        action_row(ui, &p, tr("VPN mode"), how, |ui| {
+                            use crate::store::VpnMode;
+                            let cur = match d.vpn_mode { VpnMode::Auto => 0, VpnMode::System => 1, VpnMode::Proxy => 2 };
+                            if let Some(i) = segmented(ui, &p, &[tr("Auto"), tr("Whole system"), tr("Proxy")], cur) {
+                                d.vpn_mode = [VpnMode::Auto, VpnMode::System, VpnMode::Proxy][i];
+                            }
+                        });
+                        if !snap.will_use_tun {
+                            separator(ui, &p);
+                            setting_row(ui, &p, tr("Set the system proxy"), tr("Browsers and apps use the VPN automatically; put back when you turn it off"), &mut d.system_proxy);
+                        }
+                        if !simple {
+                            separator(ui, &p);
+                            action_row(ui, &p, tr("Proxy address"), tr("SOCKS5 + HTTP on one port, for browsers"), |ui| {
+                                ui.add(egui::TextEdit::singleline(&mut d.proxy).desired_width(140.0));
+                            });
+                        }
+                        separator(ui, &p);
                         setting_row(ui, &p, tr("Private DNS through the tunnel"), tr("Stops DNS leaks and DNS blocking by the provider"), &mut d.override_dns);
                         if !simple {
                             separator(ui, &p);
@@ -1342,7 +1377,7 @@ impl App {
                         }
                         if snap.can_skip_password {
                             separator(ui, &p);
-                            action_row(ui, &p, tr("Don't ask for the password"), tr("Turning the VPN on asks for your password (it changes routes and DNS)."), |ui| {
+                            action_row(ui, &p, tr("Don't ask for the password"), tr("Asks for the password once; after that the whole-system VPN starts without asking (Auto mode uses it)."), |ui| {
                                 if ghost_button(ui, &p, tr("Allow")).clicked() {
                                     self.send(Command::AllowWithoutPassword);
                                 }

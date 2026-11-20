@@ -26,6 +26,12 @@ pub enum Theme { #[default] System, Light, Dark }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum Accent { #[default] System, Blue, Teal, Green, Yellow, Orange, Red, Pink, Purple, Slate }
 
+/// How the VPN is applied.
+/// Auto: whole system when that needs no password (admin, or "Allow without
+/// password" was set up once), otherwise proxy only — never asks for root.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum VpnMode { #[default] Auto, System, Proxy }
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum Language { #[default] Auto, En, Ru }
 
@@ -51,6 +57,11 @@ pub struct Settings {
     /// Notify when a new engine was downloaded / installed.
     pub notify_engine_update: bool,
     // ---- vpn
+    pub vpn_mode: VpnMode,
+    /// local SOCKS5 + HTTP proxy port (both on one port), e.g. 127.0.0.1:2080
+    pub proxy: String,
+    /// proxy mode: point the desktop's proxy setting at it while connected
+    pub system_proxy: bool,
     pub override_dns: bool,
     pub dns: Vec<String>,
     pub bypass_lan: bool,
@@ -85,6 +96,9 @@ impl Default for Settings {
             reminder_minutes: 30,
             auto_update_engine: true,
             notify_engine_update: true,
+            vpn_mode: VpnMode::Auto,
+            proxy: "127.0.0.1:2080".into(),
+            system_proxy: true,
             override_dns: true,
             dns: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             bypass_lan: true,
@@ -135,6 +149,12 @@ impl Paths {
     pub fn config_file(&self) -> PathBuf { self.config_dir.join("config.toml") }
     pub fn ipc_file(&self) -> PathBuf { self.config_dir.join("ipc.json") }
     pub fn bin_dir(&self) -> PathBuf { self.data_dir.join("bin") }
+    /// desktop proxy settings saved before CyberVPN changed them
+    pub fn sysproxy_backup(&self) -> PathBuf { self.config_dir.join("system-proxy.backup.json") }
+    /// per-user runtime files (engine config in proxy mode)
+    pub fn run_dir(&self) -> PathBuf {
+        std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("cybervpn")
+    }
 }
 
 fn private_dir(d: &std::path::Path) -> Result<()> {

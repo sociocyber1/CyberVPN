@@ -76,6 +76,28 @@ How it works in TUN mode, without leaking the rest:
 CyberVPN and hy2tui never run in TUN mode at the same time. The second one refuses and says
 which is running. Leftovers of a crashed session are cleaned automatically.
 
+## No root needed: proxy mode
+
+CyberVPN works **without administrator rights and without asking for a
+password**. Settings → *VPN mode*:
+
+| Mode | What goes through the VPN | Password? |
+|---|---|---|
+| **Auto** (default) | Whole system if that needs no password, otherwise proxy | never |
+| **Whole system** | All apps and DNS (TUN device) | yes, unless "Don't ask for the password" was allowed once |
+| **Proxy** | Browsers and apps that use the system proxy | never |
+
+In proxy mode CyberVPN opens **SOCKS5 + HTTP on `127.0.0.1:2080`** and, while
+connected, points the desktop proxy setting at it: GNOME/Cinnamon/MATE/XFCE
+gsettings, KDE, or Windows Internet Settings. Firefox and Chromium with "use
+system proxy" pick it up automatically. Your old proxy settings come back when
+you turn the VPN off, and after a crash on the next start.
+
+Apps that ignore the system proxy (some games, CLI tools) are not covered in
+this mode. Use `curl -x socks5h://127.0.0.1:2080 …`, or switch to *Whole system*.
+To get whole-system mode without password prompts, press **Settings → Don't ask
+for the password → Allow** once; *Auto* then uses it.
+
 ## Stability notes
 
 - **IPv6 auto-check.** Many VPN servers have no IPv6. Without this check, apps
