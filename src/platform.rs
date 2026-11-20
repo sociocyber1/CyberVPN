@@ -182,6 +182,7 @@ pub fn remind(on_click: impl FnOnce() + Send + 'static) {
 /// Start a GUI window process.
 pub fn open_window() {
     let mut c = Command::new(exe());
+    c.arg("--window");
     c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     let _ = c.spawn();
 }

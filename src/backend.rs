@@ -88,7 +88,7 @@ extern "C" fn on_signal(_: libc::c_int) {
     SIGNALLED.store(true, Ordering::Relaxed);
 }
 
-enum Probe { Lat(Option<u64>), Ip(Option<ExitInfo>), Apps(std::collections::HashMap<u16, String>) }
+enum Probe { Lat(Option<u64>), Ip(Option<ExitInfo>), Apps(std::collections::HashMap<u16, String>), Ipv6(Option<bool>) }
 
 fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) -> Result<()> {
     let s = &st.settings;
@@ -156,7 +156,7 @@ fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) 
     }
     if s.override_dns {
         #[cfg(target_os = "linux")]
-        let servers = match DnsServer::start(&s.dns, dns_tx.clone(), bypass.clone()) {
+        let servers = match DnsServer::start(&s.dns, dns_tx.clone(), bypass.clone(), s.ipv6 == "on") {
             Ok(srv) => {
                 g._dns_server = Some(srv);
                 vec![crate::engine::dns::LISTEN_IP.to_string()]
@@ -203,6 +203,13 @@ fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) 
                 tick.reconnects = l.count.unwrap_or(1).saturating_sub(1);
                 tick.restarts = 0;
                 last_ip = None;
+                if s.ipv6 == "auto" && g._dns_server.is_some() {
+                    let tx = probe_tx.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(800));
+                        let _ = tx.send(Probe::Ipv6(crate::engine::dns::ipv6_works()));
+                    });
+                }
             }
             if traffic.on_log(&l) || l.level == Level::Debug {
                 continue;
@@ -228,6 +235,18 @@ fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) 
                 Probe::Lat(v) => { probing_lat = false; tick.latency_ms = v; }
                 Probe::Ip(v) => { probing_ip = false; if v.is_some() { tick.exit = v; } }
                 Probe::Apps(m) => { probing_apps = false; traffic.set_apps(&m); }
+                Probe::Ipv6(v) => {
+                    if let (Some(srv), Some(ok)) = (&g._dns_server, v) {
+                        if ok != srv.ipv6_on() || !ok {
+                            pending_logs.push(app_log(Level::Info, if ok {
+                                "IPv6 works through the server — IPv6 enabled".to_string()
+                            } else {
+                                "server has no IPv6 — sites use IPv4 (IPv6 addresses hidden, nothing leaks)".to_string()
+                            }));
+                        }
+                        srv.set_ipv6(ok);
+                    }
+                }
             }
         }
 
@@ -330,12 +349,13 @@ fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) 
         tick.conn_errors = traffic.errors;
         tick.dns_avg_ms = dns_ms_sum.checked_div(tick.dns_queries).unwrap_or(0);
         tick.direct_ips = bypass.as_ref().map(|b| b.count()).unwrap_or(0);
+        tick.ipv6 = g._dns_server.as_ref().map(|d| d.ipv6_on());
         tick.top = traffic.top_domains(8);
         tick.conns = traffic
             .conns
             .iter()
             .rev()
-            .take(150)
+            .take(100)
             .map(|c| ConnView {
                 time: c.time.clone(),
                 tcp: c.proto == Proto::Tcp,
@@ -347,7 +367,7 @@ fn session(st: &BackendStart, stop: &AtomicBool, out: &mut std::net::TcpStream) 
                 dur_s: c.closed.unwrap_or_else(Instant::now).duration_since(c.opened).as_secs(),
             })
             .collect();
-        tick.dns = dns_log.iter().rev().take(150).cloned().collect();
+        tick.dns = dns_log.iter().rev().take(100).cloned().collect();
         tick.logs = std::mem::take(&mut pending_logs);
         if ipc::send(out, &BackendMsg::Tick(Box::new(tick.clone()))).is_err() {
             break; // service gone

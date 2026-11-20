@@ -76,6 +76,26 @@ How it works in TUN mode, without leaking the rest:
 CyberVPN and hy2tui never run in TUN mode at the same time. The second one refuses and says
 which is running. Leftovers of a crashed session are cleaned automatically.
 
+## Stability notes
+
+- **IPv6 auto-check.** Many VPN servers have no IPv6. Without this check, apps
+  would try IPv6 first and stall: `curl` gives "Empty reply from server",
+  YouTube loads slowly, and web apps keep reconnecting. After connecting,
+  CyberVPN checks whether IPv6 works through the server. If it doesn't, it hides
+  IPv6 addresses in DNS, so everything uses IPv4 right away. IPv6 traffic still
+  can't leak past the tunnel. Settings → Pro → *IPv6*: Auto / On / Off.
+- **The same engine as hy2tui:** the hysteria core v2.14.0, with the same
+  config.
+- **Light on CPU.** Animations run only while the window is focused. Hidden or
+  minimized windows almost stop drawing, leaving the CPU to the VPN engine.
+- **The tray needs no libraries.** On Linux it talks StatusNotifierItem over
+  D-Bus directly (no GTK, libappindicator or libxdo). It shows in XFCE, KDE,
+  Cinnamon, MATE, LXQt, waybar, and in GNOME with the AppIndicator extension.
+  Left click opens the window, middle click turns the VPN on/off, right click
+  opens the menu.
+- **One window.** Starting `cybervpn` again brings up the open window instead
+  of opening a second one.
+
 ## Install (Arch / Artix)
 
 ```sh

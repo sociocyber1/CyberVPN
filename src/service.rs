@@ -9,7 +9,7 @@ use crate::platform;
 use crate::i18n::{tr, trf};
 use crate::protocol::*;
 use crate::store::{Paths, Store};
-use crate::tray::{self, TrayCmd};
+use crate::tray::{self, TrayCmd, TrayEvent};
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::io::BufReader;
@@ -518,7 +518,7 @@ impl Svc {
             down_hist: self.down.iter().copied().collect(),
             up_hist: self.up.iter().copied().collect(),
             lat_hist: self.lat.iter().copied().collect(),
-            logs: self.logs.iter().cloned().collect(),
+            logs: self.logs.iter().skip(self.logs.len().saturating_sub(150)).cloned().collect(),
             core_version: self.core_version.clone(),
             engine: self.engine.clone(),
             install: self.install.clone(),
@@ -699,7 +699,7 @@ pub fn run(autostart: bool, background: bool) -> Result<()> {
     }
 
     let (tray_tx, tray_rx) = channel();
-    tray::spawn(tray_rx);
+    let tray_events = tray::spawn(tray_rx);
 
     let core_version = crate::engine::updater::installed_version(&paths.bin_dir());
     // background engine updater: first check after 90 s, then every 6 h, or on demand
@@ -775,26 +775,13 @@ pub fn run(autostart: bool, background: bool) -> Result<()> {
             }
             svc.handle(c);
         }
-        // tray menu
-        while let Ok(ev) = tray_icon::menu::MenuEvent::receiver().try_recv() {
-            let id = ev.id.0.as_str();
-            match id {
-                "toggle" => svc.handle(Command::Toggle),
-                "open" => svc.handle(Command::OpenWindow),
-                "quit" => { let _ = cmd_tx.send(Command::QuitApp); }
-                p if p.starts_with("p:") => {
-                    if let Ok(i) = p[2..].parse() { svc.handle(Command::Select(i)); }
-                }
-                _ => {}
-            }
-        }
-        while let Ok(ev) = tray_icon::TrayIconEvent::receiver().try_recv() {
-            if let tray_icon::TrayIconEvent::DoubleClick { .. } = ev {
-                svc.handle(Command::OpenWindow);
-            }
-            #[cfg(windows)]
-            if let tray_icon::TrayIconEvent::Click { button: tray_icon::MouseButton::Left, button_state: tray_icon::MouseButtonState::Up, .. } = ev {
-                svc.handle(Command::OpenWindow);
+        // tray clicks
+        while let Ok(ev) = tray_events.try_recv() {
+            match ev {
+                TrayEvent::Toggle => svc.handle(Command::Toggle),
+                TrayEvent::Open => svc.handle(Command::OpenWindow),
+                TrayEvent::Quit => { let _ = cmd_tx.send(Command::QuitApp); }
+                TrayEvent::Select(i) => svc.handle(Command::Select(i)),
             }
         }
 

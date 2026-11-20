@@ -321,8 +321,13 @@ impl eframe::App for App {
             });
         self.draw_toast(&ctx);
         self.draw_dialogs(&ctx, &snap);
+        // Animate only when someone is looking: a hidden or unfocused window
+        // costs almost no CPU (important with software OpenGL), leaving it
+        // all to the VPN engine.
         let busy = snap.state.is_on() || settings.animations;
-        ctx.request_repaint_after(Duration::from_millis(if busy { 33 } else { 250 }));
+        let (focused, minimized) = ctx.input(|i| (i.viewport().focused.unwrap_or(true), i.viewport().minimized.unwrap_or(false)));
+        let ms = if minimized { 1000 } else if !focused { if busy { 250 } else { 1000 } } else if busy { 33 } else { 250 };
+        ctx.request_repaint_after(Duration::from_millis(ms));
     }
 }
 
@@ -636,6 +641,7 @@ impl App {
         let t = ui.input(|i| i.time) as f32;
         let painter = ui.painter_at(rect.expand(2.0));
         let fx = fx_of(&snap.state);
+        aurora(&painter, rect, rect.center(), planet_r, &p, fx, t, full);
         if full {
             let k = if p.dark { 1.0 } else { 0.55 };
             plexus(&painter, rect, if fx == Fx::Off { p.dim } else { p.sky }, t, 30, k * if fx == Fx::Off { 0.6 } else { 1.0 });
@@ -697,6 +703,26 @@ impl App {
         });
         ui.add_space(10.0);
 
+        if st == VpnState::Connected {
+            // what protects you right now, at a glance
+            let mut chips: Vec<String> = vec![tr("Encrypted").into(), "Hysteria2 · QUIC".into()];
+            if snap.store.settings.override_dns {
+                chips.push(tr("Private DNS").into());
+            }
+            if let Some(ms) = tk.and_then(|t| t.latency_ms) {
+                chips.push(format!("{ms} ms"));
+            }
+            let w: f32 = chips.iter().map(|c| c.chars().count() as f32 * 6.6 + 28.0).sum();
+            ui.horizontal(|ui| {
+                ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
+                for c in &chips {
+                    pill(ui, c, p.sky, p.sky_soft);
+                }
+            });
+            ui.add_space(4.0);
+        }
+        ui.add_space(6.0);
+
         let (d, u) = tk.map(|t| (t.down_bps, t.up_bps)).unwrap_or((0.0, 0.0));
         boxed_list(&p).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -708,6 +734,13 @@ impl App {
                     });
                 }
             });
+            if st.is_on() && snap.down_hist.len() > 1 {
+                // live speed graph, last minute
+                egui::Frame::new().inner_margin(Margin { left: 10, right: 10, top: 0, bottom: 8 }).show(ui, |ui| {
+                    let w = ui.available_width();
+                    area_chart(ui, &p, vec2(w, 54.0), &[(&snap.down_hist, p.sky), (&snap.up_hist, p.up)], snap.down_hist.len().clamp(20, 120));
+                });
+            }
         });
         ui.add_space(10.0);
 
@@ -1166,6 +1199,18 @@ impl App {
                             setting_row(ui, &p, tr("Fast open"), tr("One round-trip less per connection"), &mut d.fast_open);
                             separator(ui, &p);
                             setting_row(ui, &p, tr("Kernel tuning (Linux)"), tr("Larger UDP buffers for QUIC speed"), &mut d.tune_sysctl);
+                            separator(ui, &p);
+                            let v6_now = match snap.tick.as_ref().and_then(|t| t.ipv6) {
+                                Some(true) if snap.state.is_on() => tr("now: on"),
+                                Some(false) if snap.state.is_on() => tr("now: hidden — the server has no IPv6"),
+                                _ => tr("Auto hides IPv6 when the server has none, so sites don't stall"),
+                            };
+                            action_row(ui, &p, "IPv6", v6_now, |ui| {
+                                let cur = match d.ipv6.as_str() { "on" => 1, "off" => 2, _ => 0 };
+                                if let Some(i) = segmented(ui, &p, &[tr("Auto"), tr("On"), tr("Off")], cur) {
+                                    d.ipv6 = ["auto", "on", "off"][i].into();
+                                }
+                            });
                             separator(ui, &p);
                             action_row(ui, &p, tr("TUN interface"), tr("Changes apply on the next connect."), |ui| {
                                 ui.add(egui::DragValue::new(&mut d.mtu).range(1280..=9000).prefix("MTU "));

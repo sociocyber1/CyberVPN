@@ -64,6 +64,9 @@ pub struct Tick {
     /// IPs routed outside the tunnel by notToVPN
     #[serde(default)]
     pub direct_ips: usize,
+    /// IPv6 answers allowed by the DNS forwarder (None = no forwarder)
+    #[serde(default)]
+    pub ipv6: Option<bool>,
     pub conns: Vec<ConnView>,
     pub dns: Vec<DnsEvent>,
     pub top: Vec<(String, u64)>,

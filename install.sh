@@ -2,9 +2,9 @@
 # CyberVPN installer for Arch / Artix (and other Linux).
 set -e
 command -v cargo >/dev/null || { echo "install Rust first: sudo pacman -S rust"; exit 1; }
-echo "==> dependencies (GTK tray, notifications, polkit)"
+echo "==> dependencies (only polkit, for the admin prompt; the tray needs no libraries)"
 if command -v pacman >/dev/null; then
-  sudo pacman -S --needed gtk3 libayatana-appindicator polkit
+  sudo pacman -S --needed polkit
 fi
 echo "==> building"
 cargo build --release

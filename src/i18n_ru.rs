@@ -213,4 +213,10 @@ pub static RU_TABLE: &[(&str, &str)] = &[
     ("Direct DNS", "Прямой DNS"),
     ("Resolves the listed domains outside the tunnel", "Определяет адреса этих доменов вне туннеля"),
     ("Works in TUN mode through CyberVPN's private DNS. Only these sites leave the tunnel; all other traffic and DNS stay protected. Sites sharing an IP with a listed one (big CDNs) also go direct. Changes apply on the next connect.", "Работает в режиме TUN через приватный DNS CyberVPN. Мимо туннеля идут только эти сайты; весь остальной трафик и DNS остаются защищены. Сайты с тем же IP, что и сайт из списка (большие CDN), тоже пойдут напрямую. Изменения применятся при следующем подключении."),
+    ("now: on", "сейчас: включён"),
+    ("now: hidden — the server has no IPv6", "сейчас: скрыт — у сервера нет IPv6"),
+    ("Auto hides IPv6 when the server has none, so sites don't stall", "«Авто» скрывает IPv6, если у сервера его нет, чтобы сайты не зависали"),
+    ("On", "Вкл"),
+    ("Encrypted", "Зашифровано"),
+    ("Private DNS", "Приватный DNS"),
 ];

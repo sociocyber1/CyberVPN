@@ -652,3 +652,37 @@ pub fn planet(painter: &egui::Painter, c: Pos2, r: f32, p: &Pal, fx: Fx, t: f32,
         }
     }
 }
+
+/// Soft glow behind the planet (state-coloured, breathing) plus, in the dark
+/// theme, a slowly twinkling starfield.
+pub fn aurora(painter: &egui::Painter, rect: egui::Rect, c: egui::Pos2, r: f32, p: &Pal, fx: Fx, t: f32, anim: bool) {
+    let col = match fx {
+        Fx::Off => p.dim,
+        Fx::Err => p.bad,
+        _ => p.sky,
+    };
+    let strength = match fx {
+        Fx::Off => if p.dark { 0.10 } else { 0.06 },
+        Fx::On => if p.dark { 0.34 } else { 0.22 },
+        _ => if p.dark { 0.24 } else { 0.16 },
+    };
+    let breathe = if anim { 0.85 + 0.15 * (t * 1.3).sin() } else { 1.0 };
+    // stacked translucent discs = cheap radial gradient
+    for i in 0..18 {
+        let k = i as f32 / 18.0;
+        let rr = r * (1.05 + k * 1.25) * (0.97 + 0.03 * breathe);
+        let a = strength * breathe * (1.0 - k).powf(2.2) / 6.0;
+        painter.circle_filled(c, rr, col.gamma_multiply(a));
+    }
+    if p.dark {
+        for i in 0..70u32 {
+            let h = |s: u32| ((i.wrapping_mul(2654435761).wrapping_add(s.wrapping_mul(40503))) % 10007) as f32 / 10007.0;
+            let pos = egui::pos2(rect.left() + h(1) * rect.width(), rect.top() + h(2) * rect.height());
+            if (pos - c).length() < r * 1.05 {
+                continue;
+            }
+            let tw = if anim { 0.5 + 0.5 * (t * (0.6 + h(3) * 1.8) + h(4) * 6.28).sin() } else { 0.7 };
+            painter.circle_filled(pos, 0.6 + h(5) * 0.9, egui::Color32::WHITE.gamma_multiply(0.15 + 0.45 * tw));
+        }
+    }
+}

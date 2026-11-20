@@ -82,7 +82,16 @@ fn main() {
             println!("CyberVPN {}\n\n  cybervpn                 open the window\n  cybervpn on|off|toggle   control the VPN\n  cybervpn add LINK        add a hy2:// server\n  cybervpn update-engine    check for a newer VPN engine now\n  cybervpn install-core [-j N] [--proxy URL]\n  cybervpn quit            stop the tray app", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        _ => gui::run(),
+        // started by the tray service: always open a window
+        Some("--window") => gui::run(),
+        // started by the user: if CyberVPN is already open, just bring it up
+        _ => {
+            let paths = Paths::get();
+            match service::running_instance(&paths) {
+                Some(info) if service::send_command(&info, &Command::OpenWindow).is_ok() => Ok(()),
+                _ => gui::run(),
+            }
+        }
     };
     if let Err(e) = res {
         eprintln!("CyberVPN: {e:#}");
