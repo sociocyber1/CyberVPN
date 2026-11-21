@@ -684,7 +684,12 @@ impl App {
         if self.page == Page::Settings {
             return self.settings(ui, snap);
         }
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.home_body(ui, snap));
+        let w = ui.available_width();
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            // keep clear of the scroll bar, never wider than the window
+            ui.set_max_width(w - 12.0);
+            self.home_body(ui, snap)
+        });
     }
 
     fn home_body(&mut self, ui: &mut Ui, snap: &Snapshot) {
@@ -737,13 +742,28 @@ impl App {
             if let Some(ms) = tk.and_then(|t| t.latency_ms) {
                 chips.push(format!("{ms} ms"));
             }
-            let w: f32 = chips.iter().map(|c| c.chars().count() as f32 * 6.6 + 28.0).sum();
-            ui.horizontal(|ui| {
-                ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
-                for c in &chips {
-                    pill(ui, c, p.sky, p.sky_soft);
+            // chips in centred rows that fit the window
+            let cw = |c: &String| c.chars().count() as f32 * 6.6 + 28.0;
+            let maxw = ui.available_width();
+            let mut rows: Vec<Vec<&String>> = vec![vec![]];
+            let mut used = 0.0;
+            for c in &chips {
+                if used + cw(c) > maxw && !rows.last().unwrap().is_empty() {
+                    rows.push(vec![]);
+                    used = 0.0;
                 }
-            });
+                used += cw(c);
+                rows.last_mut().unwrap().push(c);
+            }
+            for row in rows {
+                let w: f32 = row.iter().map(|c| cw(c)).sum();
+                ui.horizontal(|ui| {
+                    ui.add_space(((maxw - w) / 2.0).max(0.0));
+                    for c in row {
+                        pill(ui, c, p.sky, p.sky_soft);
+                    }
+                });
+            }
             if proxy_mode {
                 ui.add_space(4.0);
                 let note = if tk.is_some_and(|t| t.system_proxy) {
@@ -751,7 +771,7 @@ impl App {
                 } else {
                     tr("Proxy mode, no admin rights: set this proxy (SOCKS5 or HTTP) in your browser.")
                 };
-                ui.vertical_centered(|ui| ui.label(RichText::new(note).size(12.0).color(p.dim)));
+                ui.vertical_centered(|ui| ui.add(egui::Label::new(RichText::new(note).size(12.0).color(p.dim)).wrap()));
             }
             ui.add_space(4.0);
         }
@@ -783,8 +803,12 @@ impl App {
             if snap.store.profiles.is_empty() {
                 egui::Frame::new().inner_margin(Margin::same(14)).show(ui, |ui| {
                     ui.label(sb(tr("No servers yet")));
-                    ui.label(RichText::new(tr("Copy your hy2:// link, then press the button below.")).color(p.dim).size(12.5));
+                    ui.label(RichText::new(tr("Get the free SocioCyberneering servers, or paste your own hy2:// link.")).color(p.dim).size(12.5));
                     ui.add_space(6.0);
+                    if primary_button(ui, &p, tr("Get free servers")).clicked() {
+                        self.send(Command::FetchFreeServers);
+                    }
+                    ui.add_space(4.0);
                     if primary_button(ui, &p, tr("Paste server link")).clicked() {
                         self.paste();
                     }
@@ -801,7 +825,7 @@ impl App {
                 let cur = snap.store.profiles[sel].clone();
                 let host = crate::engine::uri::Hy2Uri::parse(&cur.uri).map(|u| format!("{}  ·  {} {}", u.host, tr("port"), u.ports)).unwrap_or_default();
                 action_row(ui, &p, tr("Server"), &host, |ui| {
-                    egui::ComboBox::from_id_salt("srv").selected_text(sb(&cur.name)).width(165.0).show_ui(ui, |ui| {
+                    egui::ComboBox::from_id_salt("srv").selected_text(sb(short(&cur.name, 20))).width((ui.available_width() * 0.55).clamp(110.0, 190.0)).show_ui(ui, |ui| {
                         for (i, pr) in snap.store.profiles.iter().enumerate() {
                             if ui.selectable_label(i == sel, &pr.name).clicked() {
                                 self.send(Command::Select(i));
@@ -825,12 +849,13 @@ impl App {
                 }
             }
         });
+        ui.add_space(12.0);
+        egui::CollapsingHeader::new(sb(tr("About SocioCyberneering Inc.")).color(p.text))
+            .id_salt("about_company")
+            .show(ui, |ui| about_company(ui, &p));
+        ui.add_space(8.0);
     }
-}
 
-// ---------------------------------------------------------------- pro mode
-
-impl App {
     fn page_title(&self, ui: &mut Ui, sub: &str) {
         if !sub.is_empty() {
             ui.label(RichText::new(sub).color(self.pal.dim));
@@ -1406,6 +1431,17 @@ impl App {
                             });
                         }
                     });
+                    self.group_title(ui, tr("Servers"));
+                    boxed_list(&p).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        action_row(ui, &p, tr("Free SocioCyberneering servers"), tr("Adds new keys from the public list (github.com/sociocyber1/txt)"), |ui| {
+                            if ghost_button(ui, &p, tr("Update")).clicked() {
+                                self.send(Command::FetchFreeServers);
+                            }
+                        });
+                    });
+                    self.group_title(ui, tr("About SocioCyberneering Inc."));
+                    about_company(ui, &p);
                     ui.add_space(14.0);
                     ui.horizontal(|ui| {
                         if ui.link(tr("About CyberVPN")).clicked() {
@@ -1433,3 +1469,49 @@ impl App {
     }
 }
 
+
+/// "very long server name" → "very long serv…"
+fn short(s: &str, n: usize) -> String {
+    if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n - 1).collect::<String>()) }
+}
+
+const SBER_CARD: &str = "2202 2081 1034 0461";
+const VIDEO: &str = "https://youtu.be/258cx_PsrRA?t=1360";
+/// the author's contact (edit assets/contact.txt)
+const CONTACT: &str = include_str!("../../assets/contact.txt");
+
+/// About the company, contacts and how to support the project.
+fn about_company(ui: &mut Ui, p: &Pal) {
+    let contact = CONTACT.trim();
+    boxed_list(p).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        egui::Frame::new().inner_margin(Margin::symmetric(14, 10)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                company_logo(ui, 28.0);
+                ui.vertical(|ui| {
+                    ui.label(sb("SocioCyberneering Inc.").color(p.text));
+                    ui.hyperlink_to(RichText::new(format!("▶ {}", tr("Video about the project"))).color(p.sky), VIDEO);
+                });
+            });
+        });
+        separator(ui, p);
+        action_row(ui, p, tr("Contacts"), contact, |ui| {
+            if ghost_button(ui, p, tr("Write")).clicked() {
+                let url = if contact.contains('@') { format!("mailto:{contact}") } else { format!("https://{contact}") };
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            }
+        });
+        separator(ui, p);
+        egui::Frame::new().inner_margin(Margin::symmetric(14, 10)).show(ui, |ui| {
+            ui.label(sb(tr("Support the author")).color(p.text));
+            ui.add(egui::Label::new(RichText::new(tr("Keep the project and the servers running.")).color(p.sky).size(12.5)).wrap());
+            ui.add_space(2.0);
+            ui.add(egui::Label::new(RichText::new(tr("If you find this work useful, you can help with money. In short, without drama: the author does everything himself, out of his own pocket and for free, while subscriptions, tools, servers and the time spent on them cost real money.")).color(p.dim).size(12.5)).wrap());
+        });
+        action_row(ui, p, tr("Sber card"), SBER_CARD, |ui| {
+            if ghost_button(ui, p, tr("Copy")).clicked() {
+                ui.ctx().copy_text(SBER_CARD.replace(' ', ""));
+            }
+        });
+    });
+}

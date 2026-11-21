@@ -120,6 +120,8 @@ impl Default for Settings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Store {
+    /// the free SocioCyberneering servers were fetched once (first start)
+    pub free_servers_done: bool,
     pub selected: usize,
     pub settings: Settings,
     pub profiles: Vec<Profile>,

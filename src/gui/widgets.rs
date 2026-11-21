@@ -246,15 +246,19 @@ pub fn action_row<R>(ui: &mut Ui, p: &Pal, title: &str, sub: &str, suffix: impl 
     let mut out = None;
     egui::Frame::new().inner_margin(Margin::symmetric(14, 10)).show(ui, |ui| {
         ui.set_min_height(34.0);
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.label(RichText::new(title).color(p.text));
-                if !sub.is_empty() {
-                    ui.label(RichText::new(sub).color(p.dim).size(12.5));
-                }
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                out = Some(suffix(ui));
+        // control on the right first, text gets what is left (never pushes
+        // the row wider than the window)
+        let w = ui.available_width();
+        ui.allocate_ui_with_layout(egui::vec2(w, 0.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            out = Some(suffix(ui));
+            ui.add_space(8.0);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.vertical(|ui| {
+                    ui.add(egui::Label::new(RichText::new(title).color(p.text)).truncate());
+                    if !sub.is_empty() {
+                        ui.add(egui::Label::new(RichText::new(sub).color(p.dim).size(12.5)).wrap());
+                    }
+                });
             });
         });
     });
@@ -322,7 +326,7 @@ pub fn destructive_button(ui: &mut Ui, p: &Pal, text: &str) -> Response {
 /// Pill status badge.
 pub fn pill(ui: &mut Ui, text: &str, fg: Color32, bg: Color32) {
     egui::Frame::new().fill(bg).corner_radius(CornerRadius::same(12)).inner_margin(Margin::symmetric(10, 3)).show(ui, |ui| {
-        ui.label(RichText::new(text).size(12.5).color(fg).family(super::theme::semibold()));
+        ui.add(egui::Label::new(RichText::new(text).size(12.5).color(fg).family(super::theme::semibold())).extend());
     });
 }
 

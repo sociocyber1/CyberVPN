@@ -186,6 +186,8 @@ pub enum Command {
     InstallCore,
     /// look for a newer engine now
     CheckEngineUpdate,
+    /// download the free SocioCyberneering server list
+    FetchFreeServers,
     /// Linux: install a polkit rule so connecting does not ask for a password
     AllowWithoutPassword,
     OpenWindow,

@@ -9,6 +9,7 @@
 
 mod backend;
 mod engine;
+mod freeservers;
 mod gui;
 mod i18n;
 mod icon;

@@ -63,6 +63,8 @@ struct Svc {
     update_trigger: Sender<()>,
     update_rx: Receiver<UpdateMsg>,
     update_progress: Arc<Progress>,
+    /// free server list being downloaded: (result channel, started by the user?)
+    free_rx: Option<(Receiver<Result<String, String>>, bool)>,
 }
 
 enum UpdateMsg {
@@ -266,6 +268,53 @@ impl Svc {
         }
     }
 
+    /// Download the free SocioCyberneering servers in the background.
+    fn fetch_free(&mut self, manual: bool) {
+        if self.free_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = channel();
+        std::thread::spawn(move || { let _ = tx.send(crate::freeservers::fetch().map_err(|e| format!("{e:#}"))); });
+        self.free_rx = Some((rx, manual));
+        if manual {
+            self.toast(tr("Getting the free servers…"), false);
+        }
+    }
+
+    fn poll_free(&mut self) {
+        let Some((rx, manual)) = &self.free_rx else { return };
+        let manual = *manual;
+        let Ok(r) = rx.try_recv() else { return };
+        self.free_rx = None;
+        match r {
+            Ok(text) => {
+                let before = self.store.profiles.len();
+                let had_selected = self.store.selected;
+                let (ok, _) = self.store.add_from_text(&text);
+                let new = self.store.profiles.len() - before;
+                self.store.free_servers_done = true;
+                if before == 0 && new > 0 {
+                    // everyone on a different key: pick one at random
+                    let r = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos() as usize ^ std::process::id() as usize).unwrap_or(0);
+                    self.store.selected = r % new;
+                } else {
+                    self.store.selected = had_selected.min(self.store.profiles.len().saturating_sub(1));
+                }
+                self.save();
+                self.log(Level::Info, format!("free SocioCyberneering servers: {} new, {} in the list", new, ok.len()));
+                if new > 0 || manual {
+                    self.toast(trf("Free servers ready: {} added — press the button to connect", &[&new]), false);
+                }
+            }
+            Err(e) => {
+                self.log(Level::Warn, format!("free servers: {e}"));
+                if manual {
+                    self.toast(tr("Could not download the free servers — check the internet and try again"), true);
+                }
+            }
+        }
+    }
+
     fn fail(&mut self, msg: String) {
         self.log(Level::Error, msg.clone());
         self.disconnect(true);
@@ -391,6 +440,7 @@ impl Svc {
             }
             Command::InstallCore => self.start_install(),
             Command::CheckEngineUpdate => { let _ = self.update_trigger.send(()); }
+            Command::FetchFreeServers => self.fetch_free(true),
             Command::AllowWithoutPassword => {
                 // pkexec shows a password dialog — don't block the tray meanwhile
                 std::thread::spawn(|| match platform::allow_without_password() {
@@ -777,13 +827,16 @@ pub fn run(autostart: bool, background: bool) -> Result<()> {
         connect_after_install: false, toast: None, toast_id: 0, clients, tray_tx,
         last_remind: Instant::now(), notified_exit: false,
         engine: EngineInfo { embedded: crate::engine::updater::embedded_version().map(String::from), ..Default::default() },
-        update_trigger, update_rx, update_progress,
+        update_trigger, update_rx, update_progress, free_rx: None,
     };
     svc.prepare_engine(); // apply a staged update / install the built-in engine
     if crate::sysproxy::restore(&svc.paths.sysproxy_backup()) {
         svc.log(Level::Warn, "desktop proxy settings from a crashed session restored");
     }
     svc.log(Level::Info, "CyberVPN started");
+    if !svc.store.free_servers_done && svc.store.profiles.is_empty() {
+        svc.fetch_free(false); // first start: get the free servers
+    }
     #[cfg(target_os = "linux")]
     if !crate::engine::sys::is_elevated() && std::path::Path::new("/var/lib/cybervpn/resolv.conf.bak").exists() {
         svc.log(Level::Warn, "DNS settings from a crashed session will be restored on the next connect");
@@ -840,6 +893,7 @@ pub fn run(autostart: bool, background: bool) -> Result<()> {
         svc.poll_backend();
         svc.poll_install();
         svc.poll_updates();
+        svc.poll_free();
         auto_update.store(svc.store.settings.auto_update_engine, Ordering::Relaxed);
 
         // reminder while off
