@@ -10,6 +10,8 @@
 //!   XUI_URL   panel address incl. base path, e.g. http://127.0.0.1:2053/abc
 //!   XUI_USER  panel login
 //!   XUI_PASS  panel password
+//!   XUI_TOKEN API token (newer 3x-ui: Settings → Security → API Token);
+//!             when set, it is used instead of the login
 //!   TXT_REPO  path to the git clone of the list (default /opt/txt)
 //!   TXT_FILE  file with the links (default README.md)
 //!
@@ -26,6 +28,7 @@ struct Cfg {
     url: String,
     user: String,
     pass: String,
+    token: String,
     repo: String,
     file: String,
 }
@@ -49,33 +52,63 @@ fn load_env(path: Option<&str>) -> Result<Cfg, String> {
         url: g("XUI_URL", "http://127.0.0.1:2053").trim_end_matches('/').to_string(),
         user: g("XUI_USER", ""),
         pass: g("XUI_PASS", ""),
+        token: g("XUI_TOKEN", ""),
         repo: g("TXT_REPO", "/opt/txt"),
         file: g("TXT_FILE", "README.md"),
     };
-    if c.user.is_empty() {
-        return Err("XUI_USER is not set".into());
+    if c.user.is_empty() && c.token.is_empty() {
+        return Err("set XUI_TOKEN (newer 3x-ui) or XUI_USER + XUI_PASS".into());
     }
     Ok(c)
 }
 
 /// Emails of the clients online right now.
 fn online(c: &Cfg) -> Result<Vec<String>, String> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).build();
-    let r = agent
-        .post(&format!("{}/login", c.url))
-        .send_form(&[("username", c.user.as_str()), ("password", c.pass.as_str())])
-        .map_err(|e| format!("login: {e}"))?;
-    let cookies: Vec<String> = r.all("set-cookie").iter().filter_map(|v| v.split(';').next()).map(String::from).collect();
-    let body: serde_json::Value = r.into_json().map_err(|e| format!("login reply: {e}"))?;
-    if body["success"] != true {
-        return Err(format!("login failed: {}", body["msg"]));
-    }
-    let r = agent
-        .post(&format!("{}/panel/api/inbounds/onlines", c.url))
-        .set("Cookie", &cookies.join("; "))
-        .call()
-        .map_err(|e| format!("onlines: {e}"))?;
-    let body: serde_json::Value = r.into_json().map_err(|e| format!("onlines reply: {e}"))?;
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).redirects(0).build();
+    // the panel checks that requests come from its own page
+    let origin = c.url.splitn(4, '/').take(3).collect::<Vec<_>>().join("/");
+    let referer = format!("{}/", c.url);
+    let ua = "Mozilla/5.0 (X11; Linux x86_64) xui-status";
+    let onl = format!("{}/panel/api/inbounds/onlines", c.url);
+    let auth = if !c.token.is_empty() {
+        ("Authorization", format!("Bearer {}", c.token))
+    } else {
+        // try a form login, then a JSON login (different 3x-ui versions)
+        let mut cookie = None;
+        let mut why = String::new();
+        for json in [false, true] {
+            let req = agent.post(&format!("{}/login", c.url)).set("Origin", &origin).set("Referer", &referer).set("User-Agent", ua).set("X-Requested-With", "XMLHttpRequest");
+            let res = if json {
+                req.send_json(serde_json::json!({ "username": c.user, "password": c.pass }))
+            } else {
+                req.send_form(&[("username", c.user.as_str()), ("password", c.pass.as_str())])
+            };
+            match res {
+                Ok(r) => {
+                    let ck: Vec<String> = r.all("set-cookie").iter().filter_map(|v| v.split(';').next()).map(String::from).collect();
+                    let body: serde_json::Value = r.into_json().unwrap_or_default();
+                    if body["success"] == true {
+                        cookie = Some(ck.join("; "));
+                        break;
+                    }
+                    why = format!("login refused: {}", body["msg"]);
+                }
+                Err(ureq::Error::Status(code, _)) => why = format!("login: HTTP {code}"),
+                Err(e) => why = format!("login: {e}"),
+            }
+        }
+        match cookie {
+            Some(ck) => ("Cookie", ck),
+            None => return Err(format!("{why}\n  hint: newer 3x-ui — create an API token (Settings → Security → API Token) and set XUI_TOKEN=…; also check XUI_URL is the panel address from the browser without a trailing /")),
+        }
+    };
+    let r = agent.post(&onl).set(auth.0, &auth.1).set("Origin", &origin).set("Referer", &referer).set("User-Agent", ua).set("X-Requested-With", "XMLHttpRequest").call();
+    let r = match r {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, _)) => return Err(format!("online clients: HTTP {code} (wrong token or panel path?)")),
+        Err(e) => return Err(format!("online clients: {e}")),
+    };
+    let body: serde_json::Value = r.into_json().map_err(|e| format!("online clients reply: {e}"))?;
     Ok(body["obj"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from).collect()).unwrap_or_default())
 }
 
