@@ -153,8 +153,30 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+fn gui_pid_file(paths: &Paths) -> std::path::PathBuf {
+    paths.ipc_file().with_file_name("window.pid")
+}
+
+/// Is a CyberVPN window running right now?
+pub fn window_open(paths: &Paths) -> bool {
+    let Ok(pid) = std::fs::read_to_string(gui_pid_file(paths)) else { return false };
+    let Ok(pid) = pid.trim().parse::<u32>() else { return false };
+    #[cfg(unix)]
+    {
+        pid != std::process::id() && std::path::Path::new(&format!("/proc/{pid}")).exists()
+            && std::fs::read_to_string(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c.contains("cybervpn"))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 pub fn run() -> anyhow::Result<()> {
     let paths = Paths::get();
+    let _ = std::fs::create_dir_all(paths.ipc_file().parent().unwrap());
+    let _ = std::fs::write(gui_pid_file(&paths), std::process::id().to_string());
     let store = crate::store::Store::load(&paths).unwrap_or_default();
     crate::i18n::set(store.settings.language);
     let size = if store.settings.mode == UiMode::Pro { PRO_SIZE } else { SIMPLE_SIZE };
@@ -188,7 +210,7 @@ pub fn run() -> anyhow::Result<()> {
             }))
         }),
     )
-    .map_err(|e| anyhow::anyhow!("{e}"))
+    .map_err(|e| anyhow::anyhow!("cannot open the window: {e}  (graphics: needs OpenGL 2+ via X11 or Wayland)"))
 }
 
 // ---------------------------------------------------------------- app

@@ -4,8 +4,28 @@ use anyhow::{bail, Result};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
+/// This program. After an update replaced the file, the running process
+/// sees ".../cybervpn (deleted)": then start the new file at the same path.
 fn exe() -> PathBuf {
-    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("cybervpn"))
+    match std::env::current_exe() {
+        Ok(p) if p.exists() => p,
+        Ok(p) => {
+            let s = p.to_string_lossy().trim_end_matches(" (deleted)").to_string();
+            let p = PathBuf::from(s);
+            if p.exists() { p } else { PathBuf::from("cybervpn") }
+        }
+        Err(_) => PathBuf::from("cybervpn"),
+    }
+}
+
+/// stderr of background processes goes here (for troubleshooting)
+fn log_file(name: &str) -> Stdio {
+    let dir = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("cybervpn");
+    let _ = std::fs::create_dir_all(&dir);
+    std::fs::File::create(dir.join(name)).map(Stdio::from).unwrap_or_else(|_| Stdio::null())
 }
 
 // ---------------------------------------------------------------- elevation
@@ -183,14 +203,14 @@ pub fn remind(on_click: impl FnOnce() + Send + 'static) {
 pub fn open_window() {
     let mut c = Command::new(exe());
     c.arg("--window");
-    c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_file("window.log"));
     let _ = c.spawn();
 }
 
 /// Start the tray service in the background (detached).
 pub fn start_service() -> Result<()> {
     let mut c = Command::new(exe());
-    c.args(["--service", "--background"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    c.args(["--service", "--background"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log_file("service.log"));
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;

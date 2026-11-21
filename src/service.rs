@@ -701,6 +701,7 @@ pub fn send_command(info: &IpcInfo, cmd: &Command) -> Result<()> {
 }
 
 pub fn run(autostart: bool, background: bool) -> Result<()> {
+    let _ = ipc::build_id(); // remember which binary we are, before it may be replaced
     let paths = Paths::get();
     if let Some(info) = running_instance(&paths) {
         if !autostart && !background {
@@ -716,7 +717,7 @@ pub fn run(autostart: bool, background: bool) -> Result<()> {
     let token = ipc::random_token();
     crate::store::write_private(
         &paths.ipc_file(),
-        serde_json::to_string(&IpcInfo { port, token: token.clone(), pid: std::process::id() })?.as_bytes(),
+        serde_json::to_string(&IpcInfo { port, token: token.clone(), pid: std::process::id(), build: ipc::build_id() })?.as_bytes(),
     )?;
     let (cmd_tx, cmd_rx) = channel::<Command>();
     let clients: Arc<Mutex<Vec<TcpStream>>> = Arc::default();

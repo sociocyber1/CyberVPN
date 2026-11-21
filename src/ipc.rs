@@ -11,6 +11,21 @@ pub struct IpcInfo {
     pub port: u16,
     pub token: String,
     pub pid: u32,
+    /// build of the running tray service (to replace an old one after an update)
+    #[serde(default)]
+    pub build: String,
+}
+
+/// Identifies this exact binary file (version + size + time), so a new
+/// binary notices an older tray app that is still running.
+pub fn build_id() -> String {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let m = std::env::current_exe().and_then(std::fs::metadata);
+        let (len, t) = m.map(|m| (m.len(), m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0))).unwrap_or((0, 0));
+        format!("{}-{len}-{t}", env!("CARGO_PKG_VERSION"))
+    })
+    .clone()
 }
 
 pub fn random_token() -> String {

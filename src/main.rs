@@ -89,7 +89,18 @@ fn main() {
         _ => {
             let paths = Paths::get();
             match service::running_instance(&paths) {
-                Some(info) if service::send_command(&info, &Command::OpenWindow).is_ok() => Ok(()),
+                // an older CyberVPN still running after an update: replace it
+                Some(info) if info.build != ipc::build_id() => {
+                    eprintln!("CyberVPN: restarting the tray app from an older version…");
+                    let _ = service::send_command(&info, &Command::QuitApp);
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                    #[cfg(unix)]
+                    unsafe { libc::kill(info.pid as i32, libc::SIGTERM); }
+                    let _ = std::fs::remove_file(paths.ipc_file());
+                    gui::run()
+                }
+                // a window is already open: bring it to the front
+                Some(info) if gui::window_open(&paths) => service::send_command(&info, &Command::OpenWindow),
                 _ => gui::run(),
             }
         }
