@@ -33,6 +33,9 @@ struct Shared {
 }
 
 pub struct App {
+    /// streamer mode on, and the frame time (for the glyph animation)
+    sm: bool,
+    now: f64,
     shared: Arc<Mutex<Shared>>,
     tx: Sender<Command>,
     page: Page,
@@ -201,6 +204,7 @@ pub fn run() -> anyhow::Result<()> {
             client(shared.clone(), rx, cc.egui_ctx.clone());
             let pal = Pal::of(store.settings.theme, store.settings.accent);
             Ok(Box::new(App {
+                sm: store.settings.streamer, now: 0.0,
                 shared, tx,
                 page: if store.settings.mode == UiMode::Pro { Page::Dashboard } else { Page::Home },
                 pal, applied: None, mode: Some(store.settings.mode), draft: None, dns_text: String::new(),
@@ -296,6 +300,8 @@ impl eframe::App for App {
             return;
         };
         let pro = settings.mode == UiMode::Pro;
+        self.sm = settings.streamer;
+        self.now = ctx.input(|i| i.time);
 
         // footer (full width)
         egui::Panel::bottom("footer")
@@ -346,7 +352,7 @@ impl eframe::App for App {
         // Animate only when someone is looking: a hidden or unfocused window
         // costs almost no CPU (important with software OpenGL), leaving it
         // all to the VPN engine.
-        let busy = snap.state.is_on() || settings.animations;
+        let busy = snap.state.is_on() || settings.animations || settings.streamer;
         let (focused, minimized) = ctx.input(|i| (i.viewport().focused.unwrap_or(true), i.viewport().minimized.unwrap_or(false)));
         let ms = if minimized { 1000 } else if !focused { if busy { 250 } else { 1000 } } else if busy { 33 } else { 250 };
         ctx.request_repaint_after(Duration::from_millis(ms));
@@ -378,7 +384,18 @@ impl App {
                 });
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let streamer_btn = |ui: &mut Ui, app: &mut Self| {
+                    let on = snap.store.settings.streamer;
+                    let b = egui::Button::new(RichText::new(if on { "◉" } else { "◌" }).size(16.0).color(if on { p.on_sky } else { p.text }))
+                        .fill(if on { p.sky_deep } else { p.card_hi })
+                        .stroke(Stroke::new(1.0, p.border))
+                        .corner_radius(CornerRadius::same(10));
+                    if ui.add(b).on_hover_text(tr("Streamer mode: hide IPs, servers and sites")).clicked() {
+                        app.set_settings(snap, |s| s.streamer = !s.streamer);
+                    }
+                };
                 if pro {
+                    streamer_btn(ui, self);
                     let mut on = snap.state.is_on();
                     if toggle(ui, &p, &mut on).changed() {
                         self.send(Command::Toggle);
@@ -394,6 +411,7 @@ impl App {
                     if ui.add(gear).on_hover_text(tr("Settings")).clicked() {
                         self.page = if settings_open { Page::Home } else { Page::Settings };
                     }
+                    streamer_btn(ui, self);
                     if let Some(i) = segmented(ui, &p, &[tr("Simple"), tr("Pro")], 0) {
                         if i == 1 {
                             self.set_settings(snap, |s| s.mode = UiMode::Pro);
@@ -697,6 +715,13 @@ impl App {
     fn home_body(&mut self, ui: &mut Ui, snap: &Snapshot) {
         let p = self.pal;
         self.engine_banner(ui, snap);
+        if snap.kill_switch_on && !snap.state.is_on() {
+            egui::Frame::new().fill(with_alpha(p.warn, 0.14)).stroke(Stroke::new(1.0, with_alpha(p.warn, 0.5))).corner_radius(CornerRadius::same(12)).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(egui::Label::new(RichText::new(tr("Internet is blocked until the VPN is on — nothing leaks.")).color(p.text).size(13.0)).wrap());
+            });
+            ui.add_space(6.0);
+        }
         let st = snap.state.clone();
         let tk = snap.tick.as_ref();
         if self.hero(ui, snap, 290.0, 92.0) {
@@ -715,7 +740,7 @@ impl App {
             let sub = match (&st, tk.and_then(|t| t.exit.as_ref())) {
                 (VpnState::Connected, Some(x)) => {
                     let place = if x.city.is_empty() { x.country.clone() } else { format!("{}, {}", x.city, x.country) };
-                    trf("Your IP: {}  ·  {}", &[&x.ip, &place])
+                    trf("Your IP: {}  ·  {}", &[&mask(&x.ip, self.sm, self.now), &mask(&place, self.sm, self.now)])
                 }
                 (VpnState::Connected, None) => tr("Checking your new IP…").into(),
                 (VpnState::Off, _) if snap.store.profiles.is_empty() => tr("Add a server to start").into(),
@@ -724,7 +749,7 @@ impl App {
                 (VpnState::Error(_), _) => tr("Tap to try again").into(),
                 _ => tr("Establishing a secure tunnel…").into(),
             };
-            let sub = decrypt_text(ui, "sub", &sub, full);
+            let sub = decrypt_text(ui, "sub", &sub, full && !self.sm);
             ui.label(RichText::new(sub).color(p.dim));
             if st == VpnState::Connected {
                 ui.label(RichText::new(dur(snap.connected_s)).monospace().size(15.0).color(p.text));
@@ -825,11 +850,12 @@ impl App {
             } else {
                 let sel = snap.store.selected.min(snap.store.profiles.len() - 1);
                 let cur = snap.store.profiles[sel].clone();
-                let host = crate::engine::uri::Hy2Uri::parse(&cur.uri).map(|u| format!("{}  ·  {} {}", u.host, tr("port"), u.ports)).unwrap_or_default();
+                let host = crate::engine::uri::Hy2Uri::parse(&cur.uri).map(|u| format!("{}  ·  {} {}", mask(&u.host, self.sm, self.now), tr("port"), mask(&u.ports, self.sm, self.now))).unwrap_or_default();
                 action_row(ui, &p, tr("Server"), &host, |ui| {
-                    egui::ComboBox::from_id_salt("srv").selected_text(sb(short(&cur.name, 20))).width((ui.available_width() * 0.55).clamp(110.0, 190.0)).show_ui(ui, |ui| {
+                    egui::ComboBox::from_id_salt("srv").selected_text(sb(mask(&short(&cur.name, 20), self.sm, self.now))).width((ui.available_width() * 0.55).clamp(110.0, 190.0)).show_ui(ui, |ui| {
                         for (i, pr) in snap.store.profiles.iter().enumerate() {
-                            let label = if pr.busy { format!("{}  · {}", pr.name, tr("busy")) } else { pr.name.clone() };
+                            let name = mask(&pr.name, self.sm, self.now);
+                            let label = if pr.busy { format!("{name}  · {}", tr("busy")) } else { name };
                             let text = if pr.busy { RichText::new(label).color(p.dim) } else { RichText::new(label) };
                             if ui.selectable_label(i == sel, text).clicked() {
                                 self.send(Command::Select(i));
@@ -889,7 +915,7 @@ impl App {
                         let col = match snap.state { VpnState::Connected => p.sky, VpnState::Error(_) => p.bad, _ => p.text };
                         ui.label(sb(decrypt_text(ui, "dstatus", &snap.state.label(), full)).size(26.0).color(col));
                         let sub = match &t.exit {
-                            Some(x) if snap.state == VpnState::Connected => trf("Exit {} ({}) · {}", &[&x.ip, &x.country, &dur(snap.connected_s)]),
+                            Some(x) if snap.state == VpnState::Connected => trf("Exit {} ({}) · {}", &[&mask(&x.ip, self.sm, self.now), &mask(&x.country, self.sm, self.now), &dur(snap.connected_s)]),
                             _ => snap.store.profiles.get(snap.store.selected).map(|x| x.name.clone()).unwrap_or_default(),
                         };
                         ui.label(RichText::new(sub).color(p.dim));
@@ -963,7 +989,7 @@ impl App {
                     };
                     let name = snap.active.and_then(|i| snap.store.profiles.get(i)).map(|x| x.name.clone()).unwrap_or("—".into());
                     kv(ui, tr("Server"), name);
-                    kv(ui, tr("Server IP"), if t.server_ip.is_empty() { "—".into() } else { t.server_ip.clone() });
+                    kv(ui, tr("Server IP"), if t.server_ip.is_empty() { "—".into() } else { mask(&t.server_ip, self.sm, self.now) });
                     kv(ui, tr("DNS queries"), trf("{} · {} ms avg", &[&t.dns_queries, &t.dns_avg_ms]));
                     if snap.store.settings.not_to_vpn {
                         kv(ui, "notToVPN", trf("{} IPs direct", &[&t.direct_ips]));
@@ -976,6 +1002,7 @@ impl App {
     }
 
     fn connections(&mut self, ui: &mut Ui, snap: &Snapshot) {
+        let (sm, now) = (self.sm, self.now);
         let p = self.pal;
         let t = snap.tick.clone().unwrap_or_default();
         self.page_title(ui, &trf("{} open · {} TCP · {} UDP total · {} errors", &[&(t.open_tcp + t.open_udp), &t.total_tcp, &t.total_udp, &t.conn_errors]));
@@ -1012,9 +1039,9 @@ impl App {
                         let c = rows[row.index()];
                         row.col(|ui| { ui.label(RichText::new(&c.time).size(12.5).color(p.dim)); });
                         row.col(|ui| { ui.label(RichText::new(if c.tcp { "TCP" } else { "UDP" }).size(12.5).color(p.sky)); });
-                        row.col(|ui| { ui.label(if c.app.is_empty() { "·" } else { &c.app }); });
-                        row.col(|ui| { ui.label(RichText::new(&c.dst).monospace()); });
-                        row.col(|ui| { ui.label(sb(&c.domain)); });
+                        row.col(|ui| { ui.label(if c.app.is_empty() { "·".to_string() } else { mask(&c.app, sm, now) }); });
+                        row.col(|ui| { ui.label(RichText::new(mask(&c.dst, sm, now)).monospace()); });
+                        row.col(|ui| { ui.label(sb(mask(&c.domain, sm, now))); });
                         row.col(|ui| { ui.label(RichText::new(dur(c.dur_s)).size(12.5).color(p.dim)); });
                         row.col(|ui| {
                             if c.open {
@@ -1034,6 +1061,7 @@ impl App {
     }
 
     fn dns(&mut self, ui: &mut Ui, snap: &Snapshot) {
+        let (sm, now) = (self.sm, self.now);
         let p = self.pal;
         let t = snap.tick.clone().unwrap_or_default();
         self.page_title(ui, &trf("{} queries · {} ms average · {} failed · resolved through the tunnel", &[&t.dns_queries, &t.dns_avg_ms, &t.dns_fail]));
@@ -1065,13 +1093,13 @@ impl App {
                                 ui.label(RichText::new(&e.qtype).size(12.5).color(p.sky));
                             }
                         });
-                        row.col(|ui| { ui.label(sb(&e.name)); });
+                        row.col(|ui| { ui.label(sb(mask(&e.name, sm, now))); });
                         let ans = if !e.ips.is_empty() {
                             e.ips.iter().take(2).map(|i| i.to_string()).collect::<Vec<_>>().join(", ")
                         } else {
                             e.cname.clone().map(|c| format!("→ {c}")).unwrap_or("—".into())
                         };
-                        row.col(|ui| { ui.label(RichText::new(ans).monospace().size(12.0)); });
+                        row.col(|ui| { ui.label(RichText::new(mask(&ans, sm, now)).monospace().size(12.0)); });
                         let sc = if e.status == "NOERROR" { p.good } else if e.status == "NXDOMAIN" { p.warn } else { p.bad };
                         row.col(|ui| { ui.colored_label(sc, &e.status); });
                     });
@@ -1103,7 +1131,7 @@ impl App {
                 for (i, pr) in snap.store.profiles.iter().enumerate() {
                     let active = snap.active == Some(i) && snap.state.is_on();
                     let info = crate::engine::uri::Hy2Uri::parse(&pr.uri)
-                        .map(|u| format!("{}:{}  ·  obfs {}  ·  {}", u.host, u.ports, u.obfs.as_deref().unwrap_or("none"),
+                        .map(|u| format!("{}:{}  ·  obfs {}  ·  {}", mask(&u.host, self.sm, self.now), mask(&u.ports, self.sm, self.now), u.obfs.as_deref().unwrap_or("none"),
                             match (pr.up_mbps, pr.down_mbps) { (Some(a), Some(b)) => format!("Brutal ↑{a} ↓{b} Mbit/s"), _ => tr("auto speed (BBR)").into() }))
                         .unwrap_or_else(|e| trf("invalid link: {}", &[&e]));
                     egui::Frame::new().inner_margin(Margin::symmetric(14, 10)).show(ui, |ui| {
@@ -1111,7 +1139,7 @@ impl App {
                             logo(ui, &p, 32.0, active);
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
-                                    ui.label(sb(&pr.name));
+                                    ui.label(sb(mask(&pr.name, self.sm, self.now)));
                                     if i == snap.store.selected {
                                         pill(ui, tr("selected"), p.sky, p.sky_soft);
                                     }
@@ -1165,9 +1193,9 @@ impl App {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new(&l.time).monospace().color(p.dim));
                         ui.label(RichText::new(tag).monospace().color(c));
-                        ui.label(RichText::new(&l.msg).monospace());
+                        ui.label(RichText::new(mask(&l.msg, self.sm, self.now)).monospace());
                         if !l.fields.is_empty() {
-                            ui.label(RichText::new(&l.fields).monospace().size(11.5).color(p.dim));
+                            ui.label(RichText::new(mask(&l.fields, self.sm, self.now)).monospace().size(11.5).color(p.dim));
                         }
                     });
                 }
@@ -1280,6 +1308,10 @@ impl App {
                         setting_row(ui, &p, tr("Local network outside the VPN"), tr("Printers, NAS, router stay reachable"), &mut d.bypass_lan);
                         separator(ui, &p);
                         setting_row(ui, &p, tr("Reconnect automatically"), "", &mut d.auto_reconnect);
+                        separator(ui, &p);
+                        setting_row(ui, &p, tr("Block the internet without VPN (kill switch)"), tr("While CyberVPN runs, nothing goes out until you turn it on: your real IP never leaks"), &mut d.kill_switch);
+                        separator(ui, &p);
+                        setting_row(ui, &p, tr("Streamer mode"), tr("IPs, servers, sites and logs turn into shifting glyphs"), &mut d.streamer);
                         if !simple {
                             separator(ui, &p);
                             setting_row(ui, &p, tr("Fast open"), tr("One round-trip less per connection"), &mut d.fast_open);

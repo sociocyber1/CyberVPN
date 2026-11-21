@@ -21,7 +21,8 @@ One button. A tray icon. No root needed.
 ## Why CyberVPN
 
 - **One button.** Paste a `hy2://` link (or take the free SocioCyberneering servers) and press the globe.
-- **No root, no password.** Auto mode protects your browsers and apps through the system proxy. Whole-system mode (TUN) is one click away.
+- **The whole system is protected by default,** and a kill switch blocks the internet while the VPN is off, so your real IP never leaks. It starts with the computer and connects by itself.
+- **Streamer mode:** IPs, servers and sites turn into shifting Watch Dogs-style glyphs.
 - **Fast.** The official Hysteria2 engine over QUIC, a DNS cache with parallel queries, Brutal congestion control, and big UDP buffers.
 - **Stays working by itself.** It reconnects after Wi-Fi changes and repairs a missing TUN or a dead link. If the server has no IPv6, it hides IPv6 addresses so sites don't stall.
 - **Looks great.** An animated planet, live speed graphs, and dark and light themes. The language (Russian or English) follows your system.
@@ -67,8 +68,8 @@ Pro mode adds a dashboard with traffic, latency and top destinations, plus pages
 
 | Mode | What goes through the VPN | Password |
 |---|---|---|
-| **Auto** (default) | The whole system if that needs no password, otherwise the proxy | never |
-| **Whole system** | All apps and DNS (TUN) | asked, unless you once allowed *Don't ask for the password* |
+| **Auto** | The whole system if that needs no password, otherwise the proxy | never |
+| **Whole system** (default) | All apps and DNS (TUN) | asked, unless you once allowed *Don't ask for the password* |
 | **Proxy** | Browsers and apps that use the system proxy | never |
 
 In proxy mode, apps that ignore the system proxy (some games and CLI tools) aren't covered. Use `curl -x socks5h://127.0.0.1:2080 …` for those, or switch to *Whole system*.
@@ -103,6 +104,21 @@ Files: `~/.config/cybervpn/config.toml` (mode 600), the engine in `~/.local/shar
 - **No tray icon:** your panel needs StatusNotifier support (XFCE systray, KDE, waybar `tray`).
 - **"Permission denied":** the password dialog was cancelled, or no polkit agent is running.
 - **Internet broken after a crash:** start CyberVPN again; it restores DNS and proxy settings at start.
+
+## Busy keys (server side)
+
+`xui-status` runs on the VPN server. It asks the 3x-ui panel which clients are online right now, adds `# busy` after their keys in the public list (the `txt` repo) and pushes the change. CyberVPN then shows those keys as busy and picks a free one. The panel password stays on the server. Get the binary from Releases (`xui-status-linux-x86_64`) or build it from `tools/xui-status`.
+
+```sh
+cat > /etc/xui-status.env <<'X'
+XUI_URL=http://127.0.0.1:2053/your-panel-path
+XUI_USER=admin
+XUI_PASS=...
+TXT_REPO=/opt/txt          # git clone of the list, with push access
+X
+xui-status --env /etc/xui-status.env --dry-run   # test
+xui-status --env /etc/xui-status.env --watch 300 # or run from cron every 5 min
+```
 
 ## Sister project
 

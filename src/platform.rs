@@ -105,6 +105,26 @@ pub fn allow_without_password() -> Result<()> {
     bail!("on Windows, start CyberVPN as administrator (autostart does this) to avoid UAC prompts")
 }
 
+/// Run `cybervpn ARGS…` as root: directly when we are root, else via pkexec
+/// (silent once "Don't ask for the password" is set up).
+pub fn run_as_root(args: &[String]) -> Result<()> {
+    if crate::engine::sys::is_elevated() {
+        let st = Command::new(exe()).args(args).stdin(Stdio::null()).status()?;
+        if !st.success() { bail!("failed ({st})") }
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let st = Command::new("pkexec").arg(exe()).args(args).stdin(Stdio::null()).status()?;
+        if !st.success() {
+            bail!("not allowed (password dialog cancelled?)");
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    bail!("not available on this system")
+}
+
 pub fn polkit_rule_installed() -> bool {
     cfg!(target_os = "linux") && std::path::Path::new("/etc/polkit-1/rules.d/49-cybervpn.rules").exists()
 }

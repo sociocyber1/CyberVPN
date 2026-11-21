@@ -170,6 +170,9 @@ pub struct Snapshot {
     /// the next "Turn on" covers the whole system (TUN); false = proxy only
     #[serde(default)]
     pub will_use_tun: bool,
+    /// the kill switch blocks the internet right now (unless the VPN is on)
+    #[serde(default)]
+    pub kill_switch_on: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

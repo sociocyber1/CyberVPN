@@ -690,3 +690,33 @@ pub fn aurora(painter: &egui::Painter, rect: egui::Rect, c: egui::Pos2, r: f32, 
         }
     }
 }
+
+/// Streamer mode: the real text never reaches the screen. Every character
+/// becomes a glyph that keeps flickering and re-scrambling (Watch Dogs
+/// style), with short glitch bursts — readable as "something is here",
+/// impossible to read as data. Spaces and length stay, so layouts don't jump.
+pub fn mask(real: &str, on: bool, t: f64) -> String {
+    if !on {
+        return real.to_string();
+    }
+    const GL: &[char] = &['0', '1', '#', '$', '%', '&', '*', '<', '>', '/', '\\', '|', 'A', 'F', '7', 'X', 'Ж', 'Ψ', 'Ω', '§', '¤', '∆', '≠', '░', '▒'];
+    let base = real.chars().fold(7u32, |h, c| h.wrapping_mul(31).wrapping_add(c as u32));
+    let burst = ((t * 0.7).sin() > 0.93) as u32; // every few seconds: a glitch burst
+    real.chars()
+        .enumerate()
+        .map(|(i, c)| {
+            if c == ' ' || c == '·' {
+                return c;
+            }
+            // each character ticks at its own speed
+            let speed = 6.0 + ((base ^ (i as u32 * 2654435761)) % 9) as f64;
+            let step = (t * speed) as u32;
+            let h = base.wrapping_add(i as u32 * 40503).wrapping_add(step.wrapping_mul(2246822519)).rotate_left(i as u32 % 13);
+            if burst == 1 && h % 3 == 0 {
+                ['█', '▓', '▒'][(h / 3 % 3) as usize]
+            } else {
+                GL[(h % GL.len() as u32) as usize]
+            }
+        })
+        .collect()
+}

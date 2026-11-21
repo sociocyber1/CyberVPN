@@ -74,6 +74,7 @@ impl Bypass {
                 IpAddr::V6(v) => ("-6", format!("{v}/128")),
             };
             if ip(&[fam, "rule", "add", "to", &cidr, "lookup", "main", "pref", PREF]) {
+                crate::engine::killswitch::allow(&[*a]); // direct sites pass the kill switch
                 out.push(*a);
             } else {
                 set.remove(a);

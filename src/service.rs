@@ -65,6 +65,15 @@ struct Svc {
     update_progress: Arc<Progress>,
     /// free server list being downloaded: (result channel, started by the user?)
     free_rx: Option<(Receiver<Result<String, String>>, bool)>,
+    /// free list could not be downloaded (internet blocked): retry once connected
+    free_retry: bool,
+    /// connect as soon as the free servers arrive (first start with autostart)
+    connect_after_free: bool,
+    /// kill switch in place, and a running change: (result, turning on?)
+    ks_on: bool,
+    ks_rx: Option<(Receiver<Result<(), String>>, bool)>,
+    /// server hosts the kill switch lets through
+    ks_hosts: Vec<String>,
 }
 
 enum UpdateMsg {
@@ -281,6 +290,70 @@ impl Svc {
         }
     }
 
+    // ------------------------------------------------------------ kill switch
+
+    fn server_hosts(&self) -> Vec<String> {
+        let mut h: Vec<String> = self.store.profiles.iter().filter_map(|p| crate::engine::uri::Hy2Uri::parse(&p.uri).ok()).map(|u| u.host).collect();
+        h.sort();
+        h.dedup();
+        h
+    }
+
+    /// Turn the kill switch on/off (root helper; asks for the password once
+    /// and installs "don't ask again", so later changes are silent).
+    fn ks_apply(&mut self, on: bool) {
+        if !cfg!(target_os = "linux") || self.ks_rx.is_some() || std::env::var_os("CYBERVPN_DEMO").is_some() {
+            return; // demo mode never touches the firewall
+        }
+        let s = &self.store.settings;
+        let hosts = self.server_hosts();
+        let mut args = vec!["--killswitch".to_string()];
+        if on {
+            args.extend(["on".into(), s.tun_name.clone(), if s.bypass_lan { "1" } else { "0" }.into()]);
+            args.extend(hosts.iter().cloned());
+        } else {
+            args.push("off".into());
+        }
+        self.ks_hosts = hosts;
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let r = (|| {
+                if !crate::engine::sys::is_elevated() && !platform::polkit_rule_installed() {
+                    platform::allow_without_password().map_err(|e| format!("{e:#}"))?;
+                }
+                platform::run_as_root(&args).map_err(|e| format!("{e:#}"))
+            })();
+            let _ = tx.send(r);
+        });
+        self.ks_rx = Some((rx, on));
+    }
+
+    fn poll_ks(&mut self) {
+        let Some((rx, on)) = &self.ks_rx else { return };
+        let on = *on;
+        let Ok(r) = rx.try_recv() else { return };
+        self.ks_rx = None;
+        match r {
+            Ok(()) => {
+                self.ks_on = on;
+                self.log(Level::Info, if on { "kill switch on: the internet is blocked unless the VPN is on" } else { "kill switch off" });
+                if on && !self.state.is_on() {
+                    self.toast(tr("Internet blocked until you turn the VPN on (kill switch)"), false);
+                }
+            }
+            Err(e) => {
+                self.log(Level::Warn, format!("kill switch: {e}"));
+                if on {
+                    self.toast(trf("Kill switch could not start: {}", &[&e]), true);
+                }
+            }
+        }
+        // the server list changed meanwhile: let the new hosts through
+        if self.ks_on && self.store.settings.kill_switch && self.server_hosts() != self.ks_hosts {
+            self.ks_apply(true);
+        }
+    }
+
     fn poll_free(&mut self) {
         let Some((rx, manual)) = &self.free_rx else { return };
         let manual = *manual;
@@ -297,6 +370,13 @@ impl Svc {
                     self.active = self.store.profiles.iter().position(|p| p.uri == u);
                 }
                 self.save();
+                self.free_retry = false;
+                if self.ks_on && self.server_hosts() != self.ks_hosts {
+                    self.ks_apply(true);
+                }
+                if std::mem::take(&mut self.connect_after_free) && !self.store.profiles.is_empty() && !self.state.is_on() {
+                    self.connect(None);
+                }
                 let busy = self.store.profiles.iter().filter(|p| p.free && p.busy).count();
                 self.log(Level::Info, format!("free SocioCyberneering servers: +{added} new, −{removed} gone, {busy} busy"));
                 if first && added > 0 {
@@ -306,6 +386,7 @@ impl Svc {
                 }
             }
             Err(e) => {
+                self.free_retry = true;
                 self.log(Level::Warn, format!("free servers: {e}"));
                 if manual {
                     self.toast(tr("Could not download the free servers — check the internet and try again"), true);
@@ -429,6 +510,11 @@ impl Svc {
             }
             Command::SaveSettings(s) => {
                 crate::i18n::set(s.language);
+                if s.kill_switch != self.store.settings.kill_switch {
+                    let on = s.kill_switch;
+                    self.store.settings.kill_switch = on;
+                    self.ks_apply(on);
+                }
                 if s.autostart != self.store.settings.autostart {
                     if let Err(e) = platform::set_autostart(s.autostart) {
                         self.toast(format!("Autostart: {e}"), true);
@@ -525,6 +611,9 @@ impl Svc {
                             }
                         }
                     }
+                    if st == VpnState::Connected && self.free_retry && self.free_rx.is_none() {
+                        self.fetch_free(false); // now the list can be downloaded through the VPN
+                    }
                     self.tick = Some(t);
                     self.set_state(st);
                 }
@@ -615,6 +704,7 @@ impl Svc {
             can_skip_password: cfg!(target_os = "linux") && !platform::polkit_rule_installed() && !crate::engine::sys::is_elevated(),
             platform_note: if cfg!(windows) { "Windows".into() } else { "Linux".into() },
             will_use_tun: self.use_tun(),
+            kill_switch_on: self.ks_on,
         }
     }
 
@@ -826,7 +916,7 @@ pub fn run(autostart: bool, background: bool) -> Result<()> {
         connect_after_install: false, toast: None, toast_id: 0, clients, tray_tx,
         last_remind: Instant::now(), notified_exit: false,
         engine: EngineInfo { embedded: crate::engine::updater::embedded_version().map(String::from), ..Default::default() },
-        update_trigger, update_rx, update_progress, free_rx: None,
+        update_trigger, update_rx, update_progress, free_rx: None, free_retry: false, connect_after_free: false, ks_on: false, ks_rx: None, ks_hosts: vec![],
     };
     svc.prepare_engine(); // apply a staged update / install the built-in engine
     if crate::sysproxy::restore(&svc.paths.sysproxy_backup()) {
@@ -841,8 +931,16 @@ pub fn run(autostart: bool, background: bool) -> Result<()> {
         svc.log(Level::Warn, "DNS settings from a crashed session will be restored on the next connect");
     }
 
+    if svc.store.settings.autostart {
+        let _ = platform::set_autostart(true); // keep the login entry pointing at this binary
+    }
+    if svc.store.settings.kill_switch {
+        svc.ks_apply(true);
+    }
     if autostart {
-        if svc.store.settings.connect_on_start && !svc.store.profiles.is_empty() {
+        if svc.store.settings.connect_on_start && svc.store.profiles.is_empty() {
+            svc.connect_after_free = true;
+        } else if svc.store.settings.connect_on_start {
             svc.connect(None);
         } else if svc.store.settings.reminder_minutes > 0 && svc.store.settings.notifications {
             let tx = cmd_tx.clone();
@@ -864,6 +962,10 @@ pub fn run(autostart: bool, background: bool) -> Result<()> {
         while let Ok(c) = cmd_rx.try_recv() {
             if matches!(c, Command::QuitApp) {
                 svc.disconnect(true);
+                if svc.ks_on {
+                    // leaving: give the internet back
+                    let _ = platform::run_as_root(&["--killswitch".into(), "off".into()]);
+                }
                 // give a proxy session time to put the desktop proxy back
                 for _ in 0..30 {
                     if !svc.paths.sysproxy_backup().exists() {
@@ -893,6 +995,7 @@ pub fn run(autostart: bool, background: bool) -> Result<()> {
         svc.poll_install();
         svc.poll_updates();
         svc.poll_free();
+        svc.poll_ks();
         auto_update.store(svc.store.settings.auto_update_engine, Ordering::Relaxed);
 
         // reminder while off

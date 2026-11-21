@@ -1,0 +1,17 @@
+[package]
+name = "xui-status"
+version = "0.1.0"
+edition = "2021"
+description = "Marks busy hy2:// keys in the free SocioCyberneering list using the 3x-ui panel (for CyberVPN)"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+ureq = { version = "2", features = ["json"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+
+[workspace]

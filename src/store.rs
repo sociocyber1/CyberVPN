@@ -64,6 +64,12 @@ pub struct Settings {
     pub notify_engine_update: bool,
     // ---- vpn
     pub vpn_mode: VpnMode,
+    /// kill switch: while CyberVPN runs, block the internet unless the VPN is on
+    pub kill_switch: bool,
+    /// streamer mode: IPs, servers, domains are shown as shifting glyphs
+    pub streamer: bool,
+    /// new defaults applied once (whole system, autostart + connect, kill switch)
+    pub defaults_v2: bool,
     /// local SOCKS5 + HTTP proxy port (both on one port), e.g. 127.0.0.1:2080
     pub proxy: String,
     /// proxy mode: point the desktop's proxy setting at it while connected
@@ -97,14 +103,17 @@ impl Default for Settings {
             accent: Accent::System,
             language: Language::Auto,
             animations: true,
-            autostart: false,
+            autostart: true,
             start_minimized: true,
-            connect_on_start: false,
+            connect_on_start: true,
             notifications: true,
             reminder_minutes: 30,
             auto_update_engine: true,
             notify_engine_update: true,
-            vpn_mode: VpnMode::Auto,
+            vpn_mode: VpnMode::System,
+            kill_switch: true,
+            streamer: false,
+            defaults_v2: true,
             proxy: "127.0.0.1:2080".into(),
             system_proxy: true,
             update_free_servers: true,
@@ -201,7 +210,19 @@ pub fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
 impl Store {
     pub fn load(p: &Paths) -> Result<Self> {
         match fs::read_to_string(p.config_file()) {
-            Ok(s) => toml::from_str(&s).with_context(|| format!("cannot parse {}", p.config_file().display())),
+            Ok(s) => {
+                let mut st: Store = toml::from_str(&s).with_context(|| format!("cannot parse {}", p.config_file().display()))?;
+                if !st.settings.defaults_v2 {
+                    // once: whole-system VPN, start with the computer and connect, kill switch
+                    let x = &mut st.settings;
+                    x.vpn_mode = VpnMode::System;
+                    x.autostart = true;
+                    x.connect_on_start = true;
+                    x.kill_switch = true;
+                    x.defaults_v2 = true;
+                }
+                Ok(st)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Store::default()),
             Err(e) => Err(e.into()),
         }

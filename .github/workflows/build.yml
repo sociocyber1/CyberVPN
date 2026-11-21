@@ -40,3 +40,19 @@ jobs:
           # a release made on github.com with empty notes gets the prepared ones
           [ -n "$(gh release view "$GITHUB_REF_NAME" --json body -q .body)" ] || gh release edit "$GITHUB_REF_NAME" --notes-file .github/release-notes.md
           gh release upload "$GITHUB_REF_NAME" ${{ matrix.asset }} ${{ matrix.asset }}.sha256 --clobber
+  xui-status:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release && cargo test --release
+        working-directory: tools/xui-status
+      - run: |
+          cp tools/xui-status/target/release/xui-status xui-status-linux-x86_64
+          sha256sum xui-status-linux-x86_64 > xui-status-linux-x86_64.sha256
+      - uses: actions/upload-artifact@v4
+        with: { name: xui-status-linux-x86_64, path: "xui-status-linux-x86_64*" }
+      - if: startsWith(github.ref, 'refs/tags/v')
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          for i in 1 2 3 4 5 6; do gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break; sleep 20; done
+          gh release upload "$GITHUB_REF_NAME" xui-status-linux-x86_64 xui-status-linux-x86_64.sha256 --clobber

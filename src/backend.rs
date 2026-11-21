@@ -126,6 +126,11 @@ pub fn session(st: &BackendStart, stop: &AtomicBool, send: &mut dyn FnMut(Backen
         (u, d) => log(Level::Info, format!("congestion control: Brutal ↑{:?} ↓{:?} Mbit/s", u, d)),
     }
 
+    // kill switch on: let this server through (the list may have new keys)
+    #[cfg(target_os = "linux")]
+    if tun {
+        crate::engine::killswitch::allow(&server_ips);
+    }
     // never run next to another TUN core (e.g. hy2tui): they share routing table 2022
     if tun {
         for m in sys::tun_preflight(&s.tun_name, &["hytun"])? {

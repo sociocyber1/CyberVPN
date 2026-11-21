@@ -34,6 +34,20 @@ fn main() {
         }
         #[cfg(target_os = "linux")]
         Some("--install-polkit") => backend::install_polkit_rule(a(1).unwrap_or("")),
+        // root helper: cybervpn --killswitch on TUN LAN(0/1) HOST... | off
+        Some("--killswitch") => {
+            if !engine::sys::is_elevated() {
+                Err(anyhow::anyhow!("must run as root"))
+            } else if a(1) == Some("off") {
+                engine::killswitch::off();
+                Ok(())
+            } else {
+                let tun = a(2).unwrap_or("cybervpn").to_string();
+                let lan = a(3) != Some("0");
+                let hosts: Vec<String> = args.iter().skip(4).cloned().collect();
+                engine::killswitch::on(&tun, lan, &hosts).map(|_| ()).map_err(|e| anyhow::anyhow!(e))
+            }
+        }
         Some("--service") => service::run(args.iter().any(|x| x == "--autostart"), args.iter().any(|x| x == "--background")),
         Some(cmd @ ("on" | "off" | "toggle" | "quit" | "update-engine")) => {
             let c = match cmd {

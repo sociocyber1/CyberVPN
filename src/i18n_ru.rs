@@ -254,4 +254,12 @@ pub static RU_TABLE: &[(&str, &str)] = &[
     ("Free servers updated: +{} new, −{} removed", "Бесплатные серверы обновлены: +{} новых, −{} удалено"),
     ("{} keys from github.com/sociocyber1/txt, {} busy. Dead keys are removed, new ones added.", "{} ключей из github.com/sociocyber1/txt, занято {}. Нерабочие удаляются, новые добавляются."),
     ("Update them at every start", "Обновлять при каждом запуске"),
+    ("Internet blocked until you turn the VPN on (kill switch)", "Интернет заблокирован, пока VPN выключен (kill switch)"),
+    ("Kill switch could not start: {}", "Kill switch не включился: {}"),
+    ("Streamer mode: hide IPs, servers and sites", "Режим стримера: скрыть IP, серверы и сайты"),
+    ("Internet is blocked until the VPN is on — nothing leaks.", "Интернет заблокирован, пока VPN выключен — ничего не утекает."),
+    ("Block the internet without VPN (kill switch)", "Блокировать интернет без VPN (kill switch)"),
+    ("While CyberVPN runs, nothing goes out until you turn it on: your real IP never leaks", "Пока CyberVPN запущен, ничего не выходит в сеть до включения VPN: настоящий IP не утечёт"),
+    ("Streamer mode", "Режим стримера"),
+    ("IPs, servers, sites and logs turn into shifting glyphs", "IP, серверы, сайты и логи превращаются в бегущие символы"),
 ];
