@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn config_shape() {
         let u = Hy2Uri::parse("hy2://pw@vpn.example.com:45765?obfs=salamander&obfs-password=ob&sni=vpn.example.com#t").unwrap();
-        let p = Profile { name: "t".into(), uri: String::new(), up_mbps: Some(50), down_mbps: Some(200) };
+        let p = Profile { name: "t".into(), uri: String::new(), up_mbps: Some(50), down_mbps: Some(200), free: false, busy: false };
         let ips: Vec<IpAddr> = vec!["203.0.113.7".parse().unwrap()];
         let c = build_config(&p, &u, &Settings::default(), &ips, true, None);
         assert_eq!(c["server"], "203.0.113.7:45765");

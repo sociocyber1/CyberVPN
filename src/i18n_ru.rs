@@ -249,4 +249,9 @@ pub static RU_TABLE: &[(&str, &str)] = &[
     ("Sber card", "Карта Сбер"),
     ("Update", "Обновить"),
     ("Copy", "Копировать"),
+    ("Copied ✓", "Скопировано ✓"),
+    ("busy", "занят"),
+    ("Free servers updated: +{} new, −{} removed", "Бесплатные серверы обновлены: +{} новых, −{} удалено"),
+    ("{} keys from github.com/sociocyber1/txt, {} busy. Dead keys are removed, new ones added.", "{} ключей из github.com/sociocyber1/txt, занято {}. Нерабочие удаляются, новые добавляются."),
+    ("Update them at every start", "Обновлять при каждом запуске"),
 ];

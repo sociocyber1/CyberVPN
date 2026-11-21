@@ -288,22 +288,21 @@ impl Svc {
         self.free_rx = None;
         match r {
             Ok(text) => {
-                let before = self.store.profiles.len();
-                let had_selected = self.store.selected;
-                let (ok, _) = self.store.add_from_text(&text);
-                let new = self.store.profiles.len() - before;
+                let first = self.store.profiles.is_empty();
+                let active_uri = self.active.filter(|_| self.state.is_on()).and_then(|i| self.store.profiles.get(i)).map(|p| p.uri.clone());
+                let (added, removed, _) = self.store.sync_free(&text);
                 self.store.free_servers_done = true;
-                if before == 0 && new > 0 {
-                    // everyone on a different key: pick one at random
-                    let r = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos() as usize ^ std::process::id() as usize).unwrap_or(0);
-                    self.store.selected = r % new;
-                } else {
-                    self.store.selected = had_selected.min(self.store.profiles.len().saturating_sub(1));
+                // keep pointing at the server in use, wherever it moved
+                if let Some(u) = active_uri {
+                    self.active = self.store.profiles.iter().position(|p| p.uri == u);
                 }
                 self.save();
-                self.log(Level::Info, format!("free SocioCyberneering servers: {} new, {} in the list", new, ok.len()));
-                if new > 0 || manual {
-                    self.toast(trf("Free servers ready: {} added — press the button to connect", &[&new]), false);
+                let busy = self.store.profiles.iter().filter(|p| p.free && p.busy).count();
+                self.log(Level::Info, format!("free SocioCyberneering servers: +{added} new, −{removed} gone, {busy} busy"));
+                if first && added > 0 {
+                    self.toast(trf("Free servers ready: {} added — press the button to connect", &[&added]), false);
+                } else if manual || added + removed > 0 {
+                    self.toast(trf("Free servers updated: +{} new, −{} removed", &[&added, &removed]), false);
                 }
             }
             Err(e) => {
@@ -834,8 +833,8 @@ pub fn run(autostart: bool, background: bool) -> Result<()> {
         svc.log(Level::Warn, "desktop proxy settings from a crashed session restored");
     }
     svc.log(Level::Info, "CyberVPN started");
-    if !svc.store.free_servers_done && svc.store.profiles.is_empty() {
-        svc.fetch_free(false); // first start: get the free servers
+    if svc.store.settings.update_free_servers || svc.store.profiles.is_empty() {
+        svc.fetch_free(false); // keep the free servers fresh (keys get re-made when a server dies)
     }
     #[cfg(target_os = "linux")]
     if !crate::engine::sys::is_elevated() && std::path::Path::new("/var/lib/cybervpn/resolv.conf.bak").exists() {

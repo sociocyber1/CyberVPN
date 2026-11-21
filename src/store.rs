@@ -14,6 +14,12 @@ pub struct Profile {
     pub up_mbps: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub down_mbps: Option<u32>,
+    /// from the free SocioCyberneering list (replaced when the list changes)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub free: bool,
+    /// the list marks this key as taken (someone is using it)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub busy: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -62,6 +68,8 @@ pub struct Settings {
     pub proxy: String,
     /// proxy mode: point the desktop's proxy setting at it while connected
     pub system_proxy: bool,
+    /// refresh the free SocioCyberneering servers at every start
+    pub update_free_servers: bool,
     pub override_dns: bool,
     pub dns: Vec<String>,
     pub bypass_lan: bool,
@@ -99,6 +107,7 @@ impl Default for Settings {
             vpn_mode: VpnMode::Auto,
             proxy: "127.0.0.1:2080".into(),
             system_proxy: true,
+            update_free_servers: true,
             override_dns: true,
             dns: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             bypass_lan: true,
@@ -204,6 +213,50 @@ impl Store {
     }
 
     /// Add every hy2:// link in `text`. Returns (added names, errors).
+    /// Sync the free SocioCyberneering keys with the downloaded list: new keys
+    /// are added, keys gone from the list (dead server, re-made keys) removed,
+    /// "busy" marks updated. Your own servers are never touched.
+    /// Returns (added, removed, selection changed).
+    pub fn sync_free(&mut self, text: &str) -> (usize, usize, bool) {
+        let list = crate::freeservers::parse(text);
+        if list.is_empty() {
+            return (0, 0, false);
+        }
+        let cur_uri = self.profiles.get(self.selected).map(|p| p.uri.clone());
+        let before = self.profiles.len();
+        self.profiles.retain(|p| !p.free || list.iter().any(|(u, _)| *u == p.uri));
+        let removed = before - self.profiles.len();
+        let mut added = 0;
+        for (uri, busy) in &list {
+            if let Some(p) = self.profiles.iter_mut().find(|p| &p.uri == uri) {
+                p.busy = *busy;
+                continue;
+            }
+            if let Ok(u) = crate::engine::uri::Hy2Uri::parse(uri) {
+                self.profiles.push(Profile { name: u.name, uri: uri.clone(), up_mbps: None, down_mbps: None, free: true, busy: *busy });
+                added += 1;
+            }
+        }
+        // keep the chosen server if it still exists and is free to use
+        let keep = cur_uri.as_ref().and_then(|u| self.profiles.iter().position(|p| &p.uri == u));
+        let changed = match keep {
+            Some(i) if !self.profiles[i].busy || !self.profiles[i].free => {
+                self.selected = i;
+                false
+            }
+            _ => {
+                let free: Vec<usize> = self.profiles.iter().enumerate().filter(|(_, p)| p.free && !p.busy).map(|(i, _)| i).collect();
+                let pool = if free.is_empty() { (0..self.profiles.len()).collect() } else { free };
+                if !pool.is_empty() {
+                    let r = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos() as usize ^ std::process::id() as usize).unwrap_or(0);
+                    self.selected = pool[r % pool.len()];
+                }
+                true
+            }
+        };
+        (added, removed, changed)
+    }
+
     pub fn add_from_text(&mut self, text: &str) -> (Vec<String>, Vec<String>) {
         let mut ok = vec![];
         let mut bad = vec![];
@@ -218,7 +271,7 @@ impl Store {
                         self.selected = i;
                         ok.push(format!("{} (already added)", self.profiles[i].name));
                     } else {
-                        self.profiles.push(Profile { name: u.name.clone(), uri: tok.to_string(), up_mbps: None, down_mbps: None });
+                        self.profiles.push(Profile { name: u.name.clone(), uri: tok.to_string(), up_mbps: None, down_mbps: None, free: false, busy: false });
                         self.selected = self.profiles.len() - 1;
                         ok.push(u.name);
                     }
@@ -227,5 +280,28 @@ impl Store {
             }
         }
         (ok, bad)
+    }
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::*;
+
+    #[test]
+    fn free_keys_follow_the_list() {
+        let mut s = Store::default();
+        s.add_from_text("hy2://mine@my.host:443#Mine");
+        let (a, r, _) = s.sync_free("hy2://k1@h:1#s-1\nhy2://k2@h:1#s-2 # busy\n");
+        assert_eq!((a, r), (2, 0));
+        assert!(s.profiles[2].busy);
+        assert!(!s.profiles[s.selected].busy);
+        // server died, keys re-made: k1 and k2 gone, k3 new; my own server stays
+        s.selected = 1; // was on k1
+        let (a, r, changed) = s.sync_free("hy2://k3@h:1#s-3\n");
+        assert_eq!((a, r), (1, 2));
+        assert!(changed);
+        assert_eq!(s.profiles.len(), 2);
+        assert_eq!(s.profiles[0].name, "Mine");
+        assert!(s.profiles.iter().any(|p| p.uri.contains("k3")));
     }
 }

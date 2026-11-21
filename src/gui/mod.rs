@@ -524,7 +524,9 @@ impl App {
                         company_logo(ui, 28.0);
                         ui.label(sb("SocioCyberneering Inc."));
                     });
-                    ui.hyperlink_to("sociocyber.site", "https://sociocyber.site");
+                    if ui.link(RichText::new("sociocyber.site").color(self.pal.sky)).clicked() {
+                        crate::platform::open_link("https://sociocyber.site");
+                    }
                     ui.add_space(8.0);
                     if ghost_button(ui, &p, tr("Close")).clicked() {
                         self.about = false;
@@ -827,7 +829,9 @@ impl App {
                 action_row(ui, &p, tr("Server"), &host, |ui| {
                     egui::ComboBox::from_id_salt("srv").selected_text(sb(short(&cur.name, 20))).width((ui.available_width() * 0.55).clamp(110.0, 190.0)).show_ui(ui, |ui| {
                         for (i, pr) in snap.store.profiles.iter().enumerate() {
-                            if ui.selectable_label(i == sel, &pr.name).clicked() {
+                            let label = if pr.busy { format!("{}  · {}", pr.name, tr("busy")) } else { pr.name.clone() };
+                            let text = if pr.busy { RichText::new(label).color(p.dim) } else { RichText::new(label) };
+                            if ui.selectable_label(i == sel, text).clicked() {
                                 self.send(Command::Select(i));
                             }
                         }
@@ -1434,11 +1438,16 @@ impl App {
                     self.group_title(ui, tr("Servers"));
                     boxed_list(&p).show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        action_row(ui, &p, tr("Free SocioCyberneering servers"), tr("Adds new keys from the public list (github.com/sociocyber1/txt)"), |ui| {
+                        let n = snap.store.profiles.iter().filter(|x| x.free).count();
+                        let b = snap.store.profiles.iter().filter(|x| x.free && x.busy).count();
+                        let sub = trf("{} keys from github.com/sociocyber1/txt, {} busy. Dead keys are removed, new ones added.", &[&n, &b]);
+                        action_row(ui, &p, tr("Free SocioCyberneering servers"), &sub, |ui| {
                             if ghost_button(ui, &p, tr("Update")).clicked() {
                                 self.send(Command::FetchFreeServers);
                             }
                         });
+                        separator(ui, &p);
+                        setting_row(ui, &p, tr("Update them at every start"), "", &mut d.update_free_servers);
                     });
                     self.group_title(ui, tr("About SocioCyberneering Inc."));
                     about_company(ui, &p);
@@ -1490,7 +1499,9 @@ fn about_company(ui: &mut Ui, p: &Pal) {
                 company_logo(ui, 28.0);
                 ui.vertical(|ui| {
                     ui.label(sb("SocioCyberneering Inc.").color(p.text));
-                    ui.hyperlink_to(RichText::new(format!("▶ {}", tr("Video about the project"))).color(p.sky), VIDEO);
+                    if ui.link(RichText::new(format!("▶ {}", tr("Video about the project"))).color(p.sky)).clicked() {
+                        crate::platform::open_link(VIDEO);
+                    }
                 });
             });
         });
@@ -1498,7 +1509,7 @@ fn about_company(ui: &mut Ui, p: &Pal) {
         action_row(ui, p, tr("Contacts"), contact, |ui| {
             if ghost_button(ui, p, tr("Write")).clicked() {
                 let url = if contact.contains('@') { format!("mailto:{contact}") } else { format!("https://{contact}") };
-                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                crate::platform::open_link(&url);
             }
         });
         separator(ui, p);
@@ -1509,8 +1520,12 @@ fn about_company(ui: &mut Ui, p: &Pal) {
             ui.add(egui::Label::new(RichText::new(tr("If you find this work useful, you can help with money. In short, without drama: the author does everything himself, out of his own pocket and for free, while subscriptions, tools, servers and the time spent on them cost real money.")).color(p.dim).size(12.5)).wrap());
         });
         action_row(ui, p, tr("Sber card"), SBER_CARD, |ui| {
-            if ghost_button(ui, p, tr("Copy")).clicked() {
-                ui.ctx().copy_text(SBER_CARD.replace(' ', ""));
+            let id = egui::Id::unique("card_copied");
+            let copied: f64 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(-10.0);
+            let now = ui.input(|i| i.time);
+            let label = if now - copied < 2.0 { tr("Copied ✓") } else { tr("Copy") };
+            if ghost_button(ui, p, label).clicked() && crate::platform::copy_text(&SBER_CARD.replace(' ', "")) {
+                ui.ctx().data_mut(|d| d.insert_temp(id, now));
             }
         });
     });

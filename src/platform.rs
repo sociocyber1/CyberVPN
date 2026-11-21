@@ -223,3 +223,31 @@ pub fn start_service() -> Result<()> {
     c.spawn()?;
     Ok(())
 }
+
+// ---------------------------------------------------------------- links & clipboard
+
+/// Open a web or mailto: link in the user's browser / mail app.
+pub fn open_link(url: &str) {
+    #[cfg(windows)]
+    let mut c = { let mut c = Command::new("cmd"); c.args(["/C", "start", "", url]); c };
+    #[cfg(target_os = "macos")]
+    let mut c = { let mut c = Command::new("open"); c.arg(url); c };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut c = { let mut c = Command::new("xdg-open"); c.arg(url); c };
+    c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    crate::engine::core::no_window(&mut c);
+    let _ = c.spawn();
+}
+
+/// Copy text to the clipboard. The clipboard object is kept alive, because
+/// on X11/Wayland the copied text vanishes when its owner goes away.
+pub fn copy_text(text: &str) -> bool {
+    use std::sync::{Mutex, OnceLock};
+    static CB: OnceLock<Mutex<Option<arboard::Clipboard>>> = OnceLock::new();
+    let cb = CB.get_or_init(|| Mutex::new(arboard::Clipboard::new().ok()));
+    let mut g = cb.lock().unwrap();
+    if g.is_none() {
+        *g = arboard::Clipboard::new().ok();
+    }
+    g.as_mut().is_some_and(|c| c.set_text(text.to_string()).is_ok())
+}
