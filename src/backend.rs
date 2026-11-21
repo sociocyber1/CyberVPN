@@ -238,6 +238,13 @@ pub fn session(st: &BackendStart, stop: &AtomicBool, send: &mut dyn FnMut(Backen
     let mut next_restart: Option<Instant> = None;
     let mut last_dns_check = Instant::now();
     let mut connected = false;
+    // watchdog: Wi-Fi off/on or another network → fresh core; TUN missing → fresh core
+    let mut net_sig = sys::default_route();
+    let mut net_changed: Option<Instant> = None;
+    let mut last_watch = Instant::now();
+    let mut last_fix: Option<Instant> = None;
+    let mut lat_fail = 0u32;
+    let core_started = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
         let t0 = Instant::now();
@@ -278,7 +285,11 @@ pub fn session(st: &BackendStart, stop: &AtomicBool, send: &mut dyn FnMut(Backen
         }
         while let Ok(p) = probe_rx.try_recv() {
             match p {
-                Probe::Lat(v) => { probing_lat = false; tick.latency_ms = v; }
+                Probe::Lat(v) => {
+                    probing_lat = false;
+                    tick.latency_ms = v;
+                    lat_fail = if v.is_some() { 0 } else { lat_fail + 1 };
+                }
                 Probe::Ip(v) => { probing_ip = false; if v.is_some() { tick.exit = v; } }
                 Probe::Apps(m) => { probing_apps = false; traffic.set_apps(&m); }
                 Probe::Ipv6(v) => {
@@ -319,6 +330,46 @@ pub fn session(st: &BackendStart, stop: &AtomicBool, send: &mut dyn FnMut(Backen
                     pending_logs.push(app_log(Level::Error, format!("{e:#}")));
                     next_restart = Some(Instant::now() + Duration::from_secs(10));
                 }
+            }
+        }
+
+        // watchdog (Linux): restart the core when the network changed, the TUN
+        // device is missing, or nothing gets through — like toggling Wi-Fi did
+        #[cfg(target_os = "linux")]
+        if last_watch.elapsed() >= Duration::from_secs(1) && s.auto_reconnect {
+            last_watch = Instant::now();
+            let sig = sys::default_route();
+            if sig != net_sig {
+                pending_logs.push(app_log(Level::Info, match &sig { Some(x) => format!("network: {x}"), None => "network: offline".into() }));
+                net_sig = sig;
+                net_changed = Some(Instant::now());
+            }
+            let calm = last_fix.is_none_or(|t| t.elapsed() > Duration::from_secs(20));
+            let why = if net_sig.is_none() || !calm || g.child.is_none() {
+                None
+            } else if net_changed.is_some_and(|t| t.elapsed() >= Duration::from_secs(2)) {
+                net_changed = None;
+                Some("the network changed")
+            } else if tun && core_started.elapsed() > Duration::from_secs(6) && sys::if_stats(&s.tun_name).is_none() {
+                Some("the TUN device is missing")
+            } else if connected && lat_fail >= 5 {
+                Some("connected, but nothing gets through")
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                last_fix = Some(Instant::now());
+                lat_fail = 0;
+                pending_logs.push(app_log(Level::Warn, format!("{why} — restarting the VPN engine")));
+                if let Some(mut c) = g.child.take() {
+                    core::stop(&mut c);
+                }
+                if tun {
+                    let _ = sys::tun_preflight(&s.tun_name, &["hytun"]); // clear stale TUN / routes
+                }
+                connected = false;
+                tick.phase = Phase::Reconnecting(tick.restarts + 1);
+                next_restart = Some(Instant::now() + Duration::from_millis(500));
             }
         }
 

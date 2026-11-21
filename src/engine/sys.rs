@@ -413,6 +413,29 @@ fn http_get(host: &str, path: &str, via: Option<SocketAddr>, timeout: Duration) 
     Ok((ttfb, String::from_utf8_lossy(&all).into_owned()))
 }
 
+/// The physical default route, e.g. "wlan0 via 192.168.1.1" (None = offline
+/// or unknown). TUN devices are ignored.
+pub fn default_route() -> Option<String> {
+    let t = std::fs::read_to_string("/proc/net/route").ok()?;
+    let mut best: Option<(u32, String)> = None;
+    for l in t.lines().skip(1) {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if f.len() < 8 || f[1] != "00000000" || f[7] != "00000000" {
+            continue;
+        }
+        let iface = f[0];
+        if iface.starts_with("tun") || iface == "hytun" || iface == "cybervpn" || iface.starts_with("nekoray") || iface.starts_with("sing") {
+            continue;
+        }
+        let gw = std::net::Ipv4Addr::from(u32::from_str_radix(f[2], 16).unwrap_or(0).swap_bytes());
+        let metric: u32 = f[6].parse().unwrap_or(0);
+        if best.as_ref().is_none_or(|(m, _)| metric < *m) {
+            best = Some((metric, format!("{iface} via {gw}")));
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
 /// Round trip through the tunnel (HTTP time-to-first-byte from 1.1.1.1).
 pub fn latency_ms(via: Option<SocketAddr>) -> Option<u64> {
     http_get("1.1.1.1", "/", via, Duration::from_secs(5)).ok().map(|(d, _)| d.as_millis() as u64)
