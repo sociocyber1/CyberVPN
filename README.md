@@ -105,21 +105,6 @@ Files: `~/.config/cybervpn/config.toml` (mode 600), the engine in `~/.local/shar
 - **"Permission denied":** the password dialog was cancelled, or no polkit agent is running.
 - **Internet broken after a crash:** start CyberVPN again; it restores DNS and proxy settings at start.
 
-## Busy keys (server side)
-
-`xui-status` runs on the VPN server. It asks the 3x-ui panel which clients are online right now, adds `# busy` after their keys in the public list (the `txt` repo) and pushes the change. CyberVPN then shows those keys as busy and picks a free one. The panel password stays on the server. Get the binary from Releases (`xui-status-linux-x86_64`) or build it from `tools/xui-status`.
-
-```sh
-cat > /etc/xui-status.env <<'X'
-XUI_URL=http://127.0.0.1:2053/your-panel-path
-XUI_USER=admin
-XUI_PASS=...
-TXT_REPO=/opt/txt          # git clone of the list, with push access
-X
-xui-status --env /etc/xui-status.env --dry-run   # test
-xui-status --env /etc/xui-status.env --watch 300 # or run from cron every 5 min
-```
-
 ## Sister project
 
 **[hy2tui](https://github.com/sociocyber1/hy2tui)** is the same engine as a fast terminal app with a btop-style dashboard.

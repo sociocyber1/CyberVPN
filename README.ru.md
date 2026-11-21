@@ -105,21 +105,6 @@ cargo build --release
 - **«Permission denied»:** окно пароля закрыли, или не запущен polkit-агент.
 - **Пропал интернет после сбоя:** запустите CyberVPN снова. При запуске он восстанавливает DNS и настройки прокси.
 
-## Занятые ключи (на сервере)
-
-`xui-status` работает на VPN-сервере. Он спрашивает у панели 3x-ui, какие клиенты сейчас онлайн, дописывает `# busy` после их ключей в открытом списке (репозиторий `txt`) и отправляет изменения. CyberVPN показывает такие ключи как занятые и выбирает свободный. Пароль от панели остаётся на сервере. Бинарник берётся из Releases (`xui-status-linux-x86_64`) или собирается из `tools/xui-status`.
-
-```sh
-cat > /etc/xui-status.env <<'X'
-XUI_URL=http://127.0.0.1:2053/путь-панели
-XUI_USER=admin
-XUI_PASS=...
-TXT_REPO=/opt/txt          # git clone списка, с правом push
-X
-xui-status --env /etc/xui-status.env --dry-run   # проверить
-xui-status --env /etc/xui-status.env --watch 300 # или из cron каждые 5 минут
-```
-
 ## Родственный проект
 
 **[hy2tui](https://github.com/sociocyber1/hy2tui)** — тот же движок в виде быстрого консольного приложения с дашбордом в стиле btop.
