@@ -1,6 +1,6 @@
 [package]
 name = "cybervpn"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "CyberVPN — desktop Hysteria2 VPN (TUN) with tray, notifications and dashboard"
 license = "GPL-3.0-or-later"
