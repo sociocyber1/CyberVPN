@@ -691,29 +691,39 @@ pub fn aurora(painter: &egui::Painter, rect: egui::Rect, c: egui::Pos2, r: f32, 
     }
 }
 
-/// Streamer mode: the real text never reaches the screen. Every character
-/// becomes a glyph that keeps flickering and re-scrambling (Watch Dogs
-/// style), with short glitch bursts — readable as "something is here",
-/// impossible to read as data. Spaces and length stay, so layouts don't jump.
+/// Streamer mode: the real text never reaches the screen. A new value
+/// scrambles through flickering glyphs for one second (Watch Dogs style),
+/// then settles into a fixed glyph string. Spaces and length stay, so
+/// layouts don't jump.
 pub fn mask(real: &str, on: bool, t: f64) -> String {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
     if !on {
         return real.to_string();
     }
     const GL: &[char] = &['0', '1', '#', '$', '%', '&', '*', '<', '>', '/', '\\', '|', 'A', 'F', '7', 'X', 'Ж', 'Ψ', 'Ω', '§', '¤', '∆', '≠', '░', '▒'];
     let base = real.chars().fold(7u32, |h, c| h.wrapping_mul(31).wrapping_add(c as u32));
-    let burst = ((t * 0.7).sin() > 0.93) as u32; // every few seconds: a glitch burst
+    // when did this value first appear?
+    static SEEN: OnceLock<Mutex<HashMap<u32, f64>>> = OnceLock::new();
+    let age = {
+        let mut m = SEEN.get_or_init(Default::default).lock().unwrap();
+        if m.len() > 4000 {
+            m.retain(|_, v| t - *v < 5.0);
+        }
+        t - *m.entry(base).or_insert(t)
+    };
+    let settled = age >= 1.0;
     real.chars()
         .enumerate()
         .map(|(i, c)| {
             if c == ' ' || c == '·' {
                 return c;
             }
-            // each character ticks at its own speed
-            let speed = 6.0 + ((base ^ (i as u32 * 2654435761)) % 9) as f64;
-            let step = (t * speed) as u32;
-            let h = base.wrapping_add(i as u32 * 40503).wrapping_add(step.wrapping_mul(2246822519)).rotate_left(i as u32 % 13);
-            if burst == 1 && h % 3 == 0 {
-                ['█', '▓', '▒'][(h / 3 % 3) as usize]
+            // while scrambling each character ticks at its own speed; then it stops
+            let step = if settled { 0 } else { (t * (8.0 + ((base ^ (i as u32).wrapping_mul(2654435761)) % 9) as f64)) as u32 };
+            let h = base.wrapping_add((i as u32).wrapping_mul(40503)).wrapping_add(step.wrapping_mul(2246822519)).rotate_left(i as u32 % 13);
+            if !settled && age > 0.6 && h % 4 == 0 {
+                ['█', '▓', '▒'][(h / 4 % 3) as usize] // glitch just before it settles
             } else {
                 GL[(h % GL.len() as u32) as usize]
             }

@@ -352,7 +352,7 @@ impl eframe::App for App {
         // Animate only when someone is looking: a hidden or unfocused window
         // costs almost no CPU (important with software OpenGL), leaving it
         // all to the VPN engine.
-        let busy = snap.state.is_on() || settings.animations || settings.streamer;
+        let busy = snap.state.is_on() || settings.animations;
         let (focused, minimized) = ctx.input(|i| (i.viewport().focused.unwrap_or(true), i.viewport().minimized.unwrap_or(false)));
         let ms = if minimized { 1000 } else if !focused { if busy { 250 } else { 1000 } } else if busy { 33 } else { 250 };
         ctx.request_repaint_after(Duration::from_millis(ms));
