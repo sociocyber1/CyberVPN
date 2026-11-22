@@ -55,7 +55,8 @@ struct Svc {
     connect_after_install: bool,
     toast: Option<(u64, String, bool)>,
     toast_id: u64,
-    clients: Arc<Mutex<Vec<TcpStream>>>,
+    /// open windows: (id, queue to its writer thread)
+    clients: Arc<Mutex<Vec<(u64, std::sync::mpsc::SyncSender<Arc<String>>)>>>,
     tray_tx: Sender<TrayCmd>,
     last_remind: Instant,
     notified_exit: bool,
@@ -711,8 +712,11 @@ impl Svc {
     fn broadcast(&self, msg: &ToGui) {
         let Ok(mut line) = serde_json::to_string(msg) else { return };
         line.push('\n');
+        // never block the service: each window has its own writer thread;
+        // a slow or stuck window just misses a snapshot
+        let line = Arc::new(line);
         let mut cl = self.clients.lock().unwrap();
-        cl.retain_mut(|s| std::io::Write::write_all(s, line.as_bytes()).is_ok());
+        cl.retain(|(_, tx)| !matches!(tx.try_send(line.clone()), Err(std::sync::mpsc::TrySendError::Disconnected(_))));
     }
 
     fn tray_update(&self) {
@@ -859,23 +863,40 @@ pub fn run(autostart: bool, background: bool) -> Result<()> {
         serde_json::to_string(&IpcInfo { port, token: token.clone(), pid: std::process::id(), build: ipc::build_id() })?.as_bytes(),
     )?;
     let (cmd_tx, cmd_rx) = channel::<Command>();
-    let clients: Arc<Mutex<Vec<TcpStream>>> = Arc::default();
+    let clients: Arc<Mutex<Vec<(u64, std::sync::mpsc::SyncSender<Arc<String>>)>>> = Arc::default();
     {
         let (clients, cmd_tx) = (clients.clone(), cmd_tx.clone());
-        std::thread::spawn(move || loop {
-            let Ok((s, mut r)) = ipc::accept_auth(&listener, &token) else { continue };
-            let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
-            if let Ok(w) = s.try_clone() {
-                clients.lock().unwrap().push(w);
-            }
-            let tx = cmd_tx.clone();
-            std::thread::spawn(move || {
-                while let Ok(Some(c)) = ipc::read_line::<Command>(&mut r) {
-                    if tx.send(c).is_err() {
-                        break;
-                    }
+        std::thread::spawn(move || {
+            let mut next_id = 0u64;
+            loop {
+                let Ok((s, mut r)) = ipc::accept_auth(&listener, &token) else { continue };
+                let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
+                let _ = s.set_nodelay(true);
+                next_id += 1;
+                let id = next_id;
+                let (wtx, wrx) = std::sync::mpsc::sync_channel::<Arc<String>>(4);
+                if let Ok(mut w) = s.try_clone() {
+                    clients.lock().unwrap().push((id, wtx));
+                    std::thread::spawn(move || {
+                        while let Ok(line) = wrx.recv() {
+                            if std::io::Write::write_all(&mut w, line.as_bytes()).is_err() {
+                                break;
+                            }
+                        }
+                        let _ = w.shutdown(std::net::Shutdown::Both);
+                    });
                 }
-            });
+                let (tx, clients) = (cmd_tx.clone(), clients.clone());
+                std::thread::spawn(move || {
+                    while let Ok(Some(c)) = ipc::read_line::<Command>(&mut r) {
+                        if tx.send(c).is_err() {
+                            break;
+                        }
+                    }
+                    // window gone: forget it (so "open window" really opens one)
+                    clients.lock().unwrap().retain(|(i, _)| *i != id);
+                });
+            }
         });
     }
 

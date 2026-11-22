@@ -33,6 +33,8 @@ struct Shared {
 }
 
 pub struct App {
+    /// settings just changed here, shown at once until the tray app confirms
+    pending: std::cell::RefCell<Option<(Settings, Instant, bool)>>,
     /// streamer mode on, and the frame time (for the glyph animation)
     sm: bool,
     now: f64,
@@ -148,6 +150,8 @@ fn install_fonts(ctx: &egui::Context) {
     add(&mut fonts, "inter", include_bytes!("../../assets/Inter-Regular.ttf"));
     add(&mut fonts, "inter-semibold", include_bytes!("../../assets/Inter-SemiBold.ttf"));
     add(&mut fonts, "dejavu", include_bytes!("../../assets/DejaVuSans.ttf"));
+    add(&mut fonts, "montserrat", include_bytes!("../../assets/Montserrat-Regular.ttf"));
+    fonts.families.insert(egui::FontFamily::Name("brand".into()), vec!["montserrat".into(), "inter".into(), "dejavu".into()]);
     let prop = fonts.families.entry(egui::FontFamily::Proportional).or_default();
     prop.insert(0, "inter".into());
     prop.push("dejavu".into());
@@ -204,7 +208,7 @@ pub fn run() -> anyhow::Result<()> {
             client(shared.clone(), rx, cc.egui_ctx.clone());
             let pal = Pal::of(store.settings.theme, store.settings.accent);
             Ok(Box::new(App {
-                sm: store.settings.streamer, now: 0.0,
+                pending: Default::default(), sm: store.settings.streamer, now: 0.0,
                 shared, tx,
                 page: if store.settings.mode == UiMode::Pro { Page::Dashboard } else { Page::Home },
                 pal, applied: None, mode: Some(store.settings.mode), draft: None, dns_text: String::new(),
@@ -234,6 +238,7 @@ impl App {
     fn set_settings(&self, snap: &Snapshot, f: impl FnOnce(&mut Settings)) {
         let mut s = snap.store.settings.clone();
         f(&mut s);
+        *self.pending.borrow_mut() = Some((s.clone(), Instant::now(), false));
         self.send(Command::SaveSettings(s));
     }
 
@@ -261,6 +266,22 @@ impl eframe::App for App {
         if focus {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        // a change made here shows immediately, even before the tray app answers
+        let mut snap = snap;
+        if let Some(sn) = &mut snap {
+            let mut p = self.pending.borrow_mut();
+            if let Some((s, t, resent)) = p.as_mut() {
+                if sn.store.settings == *s || t.elapsed() > Duration::from_secs(8) {
+                    *p = None;
+                } else {
+                    if !*resent && t.elapsed() > Duration::from_millis(1500) {
+                        *resent = true;
+                        let _ = self.tx.send(Command::SaveSettings(s.clone())); // not confirmed yet: send again
+                    }
+                    sn.store.settings = s.clone();
+                }
+            }
         }
         let settings = snap.as_ref().map(|s| s.store.settings.clone()).unwrap_or_default();
         crate::i18n::set(settings.language);
@@ -310,10 +331,10 @@ impl eframe::App for App {
             .frame(egui::Frame::new().fill(p.panel).stroke(Stroke::new(1.0, p.border)).inner_margin(Margin::symmetric(12, 5)))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    let w = 20.0 + 6.0 + 260.0;
+                    let w = 20.0 + 6.0 + 330.0;
                     ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
                     company_logo(ui, 20.0);
-                    ui.label(sb("SocioCyberneering Inc.").size(12.0).color(p.text));
+                    brand_name(ui, 11.5, p.text);
                     ui.label(RichText::new(format!("·  CyberVPN {}", env!("CARGO_PKG_VERSION"))).size(11.5).color(p.dim));
                 });
             });
@@ -540,7 +561,7 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.add_space((ui.available_width() - 200.0).max(0.0) / 2.0);
                         company_logo(ui, 28.0);
-                        ui.label(sb("SocioCyberneering Inc."));
+                        brand_name(ui, 13.0, self.pal.text);
                     });
                     if ui.link(RichText::new("sociocyber.site").color(self.pal.sky)).clicked() {
                         crate::platform::open_link("https://sociocyber.site");
@@ -879,10 +900,10 @@ impl App {
                 }
             }
         });
-        ui.add_space(12.0);
-        egui::CollapsingHeader::new(sb(tr("About SocioCyberneering Inc.")).color(p.text))
-            .id_salt("about_company")
-            .show(ui, |ui| about_company(ui, &p));
+        ui.add_space(14.0);
+        ui.label(sb(tr("About SocioCyberneering Inc.")).size(15.0).color(p.text));
+        ui.add_space(6.0);
+        about_company(ui, &p);
         ui.add_space(8.0);
     }
 
@@ -1530,7 +1551,7 @@ fn about_company(ui: &mut Ui, p: &Pal) {
             ui.horizontal(|ui| {
                 company_logo(ui, 28.0);
                 ui.vertical(|ui| {
-                    ui.label(sb("SocioCyberneering Inc.").color(p.text));
+                    brand_name(ui, 13.0, p.text);
                     if ui.link(RichText::new(format!("▶ {}", tr("Video about the project"))).color(p.sky)).clicked() {
                         crate::platform::open_link(VIDEO);
                     }
@@ -1561,4 +1582,20 @@ fn about_company(ui: &mut Ui, p: &Pal) {
             }
         });
     });
+}
+
+/// "SocioCyberneering Inc." in the brand font: Montserrat Regular, widely spaced.
+fn brand_name(ui: &mut Ui, size: f32, color: Color32) {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        "SocioCyberneering Inc.",
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::new(size, egui::FontFamily::Name("brand".into())),
+            color,
+            extra_letter_spacing: size * 0.16,
+            ..Default::default()
+        },
+    );
+    ui.label(job);
 }
